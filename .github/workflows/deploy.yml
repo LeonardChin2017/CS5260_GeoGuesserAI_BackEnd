@@ -10,17 +10,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Decode SSH key
-        run: |
-          echo "${{ secrets.DO_SSH_KEY }}" | base64 -d > key.pem
-          chmod 600 key.pem
-
       - name: Deploy to Droplet
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DO_HOST }}
           username: root
-          key_path: key.pem
+          key: ${{ secrets.DO_SSH_KEY }}
           script: |
             cd /srv/jobai
             git pull origin master
