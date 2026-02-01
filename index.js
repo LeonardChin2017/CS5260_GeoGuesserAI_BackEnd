@@ -440,8 +440,10 @@ app.post('/api/chat', async (req, res) => {
   });
 });
 
-/** Resume upload: saves to uploads/ or uploads/{userId}/. When Clerk is used, one resume per user in DB; files stored per-user for 100+ users. */
-app.post('/api/resume/upload', upload.single('file'), (req, res) => {
+/** Resume upload: saves file, then MCP-style extract (PDF text + Gemini) and returns extracted profile when possible. */
+const { extractResumeProfile } = require('./resume-extract');
+
+app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
   console.log('\n[RESUME] <<< Received upload from frontend');
   if (!req.file) {
     console.log('[RESUME] bad request: no file in request');
@@ -450,9 +452,10 @@ app.post('/api/resume/upload', upload.single('file'), (req, res) => {
   const fileName = req.file.filename;
   const originalName = req.file.originalname || req.file.filename;
   const now = new Date().toISOString();
+  let relativePath = fileName;
   if (hasClerk && getAuth(req)?.userId) {
     const userId = getAuth(req).userId;
-    const relativePath = `${userId}/${fileName}`; // stored path: userId/filename for per-user folders
+    relativePath = `${userId}/${fileName}`;
     const prev = db.prepare('SELECT file_path FROM user_resume WHERE user_id = ?').get(userId);
     if (prev?.file_path) {
       const oldPath = path.join(UPLOADS_DIR, prev.file_path);
@@ -471,7 +474,26 @@ app.post('/api/resume/upload', upload.single('file'), (req, res) => {
   } else {
     console.log('[RESUME] saved to local: %s (original: %s, size: %s bytes)\n', fileName, originalName, req.file.size);
   }
-  res.json({ ok: true, savedPath: fileName, originalName, uploadedAt: now });
+
+  const absolutePath = path.join(UPLOADS_DIR, relativePath);
+  let extracted = null;
+  let apiKey = (process.env.GEMINI_API_KEY || '').trim();
+  if (hasClerk && getAuth(req)?.userId) {
+    const row = db.prepare('SELECT encrypted_key FROM user_gemini_keys WHERE user_id = ?').get(getAuth(req).userId);
+    if (row?.encrypted_key) apiKey = decryptFromDb(row.encrypted_key) || apiKey;
+  }
+  if (apiKey) {
+    try {
+      extracted = await extractResumeProfile(absolutePath, apiKey);
+      if (extracted) console.log('[RESUME] Agent extracted profile for', originalName);
+    } catch (err) {
+      console.log('[RESUME] Extract/analyze error:', err?.message);
+    }
+  } else {
+    console.log('[RESUME] No Gemini API key – skip extraction (set in Settings or GEMINI_API_KEY)');
+  }
+
+  res.json({ ok: true, savedPath: fileName, originalName, uploadedAt: now, extracted: extracted || undefined });
 });
 
 /** Get current user's resume info (Clerk required). Returns { fileName, originalName, uploadedAt } or 404. */
