@@ -11,12 +11,12 @@ After uploading a resume, check the backend log (e.g. `tail -f backend.log` or P
 
 If you **don’t** see this, the backend is not building/sending steps (check for errors earlier in the log).
 
-**Optional:** Call the debug endpoint (or use the same via existing hello route):
+**Optional:** Call the debug endpoint for full trace:
 
 ```bash
 curl -s http://localhost:3001/api/debug/activity
-# Or (same data, no new route needed):
-curl -s "http://localhost:3001/api/hello?debug=activity"
+# With more rows:
+curl -s "http://localhost:3001/api/debug/activity?limit=50"
 ```
 
 - `backend_activity_count > 0` means activity is being stored.
