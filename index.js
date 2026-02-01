@@ -713,6 +713,10 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
   }
 
   const activityStepsForResponse = activityEvents.length > 0 ? activityEvents : undefined;
+  console.log('[RESUME] >>> Sending response: activitySteps count =', activityEvents.length, activityStepsForResponse ? activityStepsForResponse.length : 0);
+  if (activityEvents.length > 0) {
+    activityEvents.forEach((ev, i) => console.log('[RESUME]   step', i + 1, ':', ev.message));
+  }
   res.json({
     ok: true,
     savedPath: fileName,
