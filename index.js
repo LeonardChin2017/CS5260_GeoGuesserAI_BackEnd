@@ -477,6 +477,7 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
 
   const absolutePath = path.join(UPLOADS_DIR, relativePath);
   let extracted = null;
+  let greeting = null;
   let apiKey = (process.env.GEMINI_API_KEY || '').trim();
   if (hasClerk && getAuth(req)?.userId) {
     const row = db.prepare('SELECT encrypted_key FROM user_gemini_keys WHERE user_id = ?').get(getAuth(req).userId);
@@ -484,8 +485,13 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
   }
   if (apiKey) {
     try {
-      extracted = await extractResumeProfile(absolutePath, apiKey);
-      if (extracted) console.log('[RESUME] Agent extracted profile for', originalName);
+      const result = await extractResumeProfile(absolutePath, apiKey);
+      if (result) {
+        extracted = result.profile;
+        greeting = result.greeting || null;
+        if (extracted) console.log('[RESUME] Agent extracted profile for', originalName);
+        if (greeting) console.log('[RESUME] Agent greeting:', greeting.slice(0, 80) + '...');
+      }
     } catch (err) {
       console.log('[RESUME] Extract/analyze error:', err?.message);
     }
@@ -493,7 +499,7 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
     console.log('[RESUME] No Gemini API key – skip extraction (set in Settings or GEMINI_API_KEY)');
   }
 
-  res.json({ ok: true, savedPath: fileName, originalName, uploadedAt: now, extracted: extracted || undefined });
+  res.json({ ok: true, savedPath: fileName, originalName, uploadedAt: now, extracted: extracted || undefined, greeting: greeting || undefined });
 });
 
 /** Get current user's resume info (Clerk required). Returns { fileName, originalName, uploadedAt } or 404. */

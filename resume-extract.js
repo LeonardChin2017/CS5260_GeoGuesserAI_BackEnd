@@ -25,8 +25,10 @@ async function extractTextFromPdf(filePath) {
   }
 }
 
-/** Prompt for Gemini to return structured profile (matches frontend ExtractedProfile). */
-const RESUME_ANALYSIS_PROMPT = `You are a resume analyst. Extract key information from the following resume text and return a single JSON object only (no markdown, no code fence). Use this exact structure; infer or use placeholder when missing:
+/** Prompt for Gemini: structured profile + greeting summary (master agent summarizes for the user). */
+const RESUME_ANALYSIS_PROMPT = `You are a resume analyst. Extract key information from the following resume text and return a single JSON object only (no markdown, no code fence). Use this exact structure; infer or use placeholder when missing.
+
+Also add a "greeting" field: one short message (2-3 sentences) to greet the user by name and summarize what you found. Example: "Hi Sarah, I've read your resume—it seems like you are a Senior Software Engineer with 5+ years experience, based in Singapore. I've extracted the key info below; you can use the chat to personalize your job matches."
 
 {
   "profile": {
@@ -50,7 +52,8 @@ const RESUME_ANALYSIS_PROMPT = `You are a resume analyst. Extract key informatio
     "activeAgents": 0,
     "nextInterview": "e.g. None or date",
     "pendingAssessments": 0
-  }
+  },
+  "greeting": "Hi [first name], I've read your resume—it seems like you are [one sentence summary]. I've extracted the key info below; reply in the chat to personalize your job matches."
 }
 
 Resume text:
@@ -81,7 +84,9 @@ async function analyzeResumeWithGemini(resumeText, apiKey) {
     if (!text || typeof text !== 'string') return null;
     const raw = text.trim().replace(/^```json?\s*|\s*```$/g, '');
     const parsed = JSON.parse(raw);
-    return normalizeExtractedProfile(parsed);
+    const profile = normalizeExtractedProfile(parsed);
+    const greeting = typeof parsed.greeting === 'string' && parsed.greeting.trim() ? parsed.greeting.trim() : null;
+    return { profile, greeting };
   } catch (err) {
     console.log('[RESUME] Gemini analysis failed:', err?.message);
     return null;
@@ -123,7 +128,7 @@ function normalizeExtractedProfile(obj) {
  * MCP-style pipeline: extract text (PDF tool) then agent analysis.
  * @param {string} absoluteFilePath - Full path to the saved resume file
  * @param {string} apiKey - Gemini API key
- * @returns {Promise<object|null>} ExtractedProfile or null
+ * @returns {Promise<{ profile: object, greeting: string|null }|null>} Profile + greeting from master agent, or null
  */
 async function extractResumeProfile(absoluteFilePath, apiKey) {
   const text = await extractTextFromPdf(absoluteFilePath);
