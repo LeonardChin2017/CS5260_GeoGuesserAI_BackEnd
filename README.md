@@ -1,6 +1,6 @@
 # jobAI Backend
 
-API backend for the jobAI frontend: health check, Gemini-powered chat, resume upload, and encoded API key for the frontend.
+API backend for the jobAI frontend: health check, Gemini-powered chat, resume upload, and **per-user Gemini API key** (user enters key in Settings → stored encrypted in DB; no LLM key in server env on production).
 
 ---
 
@@ -9,7 +9,7 @@ API backend for the jobAI frontend: health check, Gemini-powered chat, resume up
 ```bash
 cd Backend
 cp .env.example .env
-# Edit .env: set GEMINI_API_KEY and GEMINI_KEY_ENCODING_SECRET (see below)
+# Edit .env: set CLERK_SECRET_KEY and ENCRYPTION_SECRET (see below)
 npm install
 npm start
 ```
@@ -24,13 +24,16 @@ Copy `.env.example` to `.env` and set:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `CLERK_SECRET_KEY` | Yes (for per-user key storage) | Clerk Secret Key from [dashboard](https://dashboard.clerk.com) → API Keys |
+| `CLERK_SECRET_KEY` | Yes (for per-user key storage) | Clerk **Secret** Key from [dashboard](https://dashboard.clerk.com) → API Keys |
+| `CLERK_PUBLISHABLE_KEY` | Yes (when using Clerk) | Clerk **Publishable** Key (same app as frontend). Backend needs it to validate requests. |
 | `ENCRYPTION_SECRET` | Yes (when using Clerk) | Min 16 chars; encrypts Gemini keys at rest in DB. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` |
 | `GEMINI_API_KEY` | No | Only for fallback when Clerk is not configured (key in request body or env) |
 | `PORT` | No | Default 3001 |
 | `GEMINI_MODEL` | No | Default gemini-2.5-flash |
 
 Never commit `.env`; it is in `.gitignore`. User Gemini keys are stored in SQLite under `data/` (encrypted).
+
+**Production (with Clerk):** You do **not** store any Gemini/LLM API key in env on the server. Users enter their key in the app (Settings); the backend stores it encrypted per user in the DB and uses it for chat based on Clerk auth. Required in env: `CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`, and `ENCRYPTION_SECRET`.
 
 ---
 

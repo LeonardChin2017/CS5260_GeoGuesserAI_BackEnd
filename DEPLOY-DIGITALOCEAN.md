@@ -15,6 +15,7 @@ Two options: **App Platform** (easiest, managed) or **Droplet** (full control).
    - **HTTP Port:** `3001`
 5. **Environment Variables** (App-level → Edit):
    - `CLERK_SECRET_KEY` = your Clerk Secret Key ([dashboard](https://dashboard.clerk.com) → API Keys)
+   - `CLERK_PUBLISHABLE_KEY` = your Clerk Publishable Key (same app; backend needs it to validate requests)
    - `ENCRYPTION_SECRET` = a secret (min 16 chars). Generate:  
      `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
    - `NODE_ENV` = `production` (optional)
@@ -37,6 +38,7 @@ If you prefer to use the Dockerfile (e.g. same image locally and in production):
    docker build -t jobai-backend .
    docker run -d --restart unless-stopped -p 3001:3001 \
      -e CLERK_SECRET_KEY="your-clerk-secret" \
+     -e CLERK_PUBLISHABLE_KEY="pk_..." \
      -e ENCRYPTION_SECRET="your-secret" \
      --name jobai-backend jobai-backend
    ```
@@ -75,6 +77,7 @@ If you prefer to use the Dockerfile (e.g. same image locally and in production):
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `CLERK_SECRET_KEY` | Yes | Clerk Secret Key from [dashboard](https://dashboard.clerk.com) → API Keys. Backend verifies JWT and stores Gemini key per user. |
+| `CLERK_PUBLISHABLE_KEY` | Yes | Clerk Publishable Key (same app as frontend). Backend needs it to validate requests. |
 | `ENCRYPTION_SECRET` | Yes | Min 16 characters; encrypts Gemini API keys at rest in the database. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` |
 | `PORT` | No | Default 3001. Set by App Platform automatically |
 
