@@ -224,12 +224,96 @@ if (hasClerk) {
   });
 }
 
-/** Call Gemini API for chat reply. apiKey can be raw string (legacy) or from DB (Clerk). */
-async function getGeminiReply(message, apiKey) {
+/** JobAI agent system prompt: persona + tools the agent can use (results are injected by the backend). */
+const JOBAI_SYSTEM_PROMPT = `You are jobAI, a friendly assistant that helps users land their next job offer. You have access to tools that run on the backend; when the user asks to find jobs, scan job offers, check application status, or get profile suggestions, the backend will run those tools and you will receive the results to summarize.
+
+Your tools (backend executes them; you describe and interpret results):
+- scan_job_offers: Search for job listings that match the user's profile (role, skills, location). You will receive a list of jobs to present.
+- get_application_status: Summarize the user's application status (saved applications, follow-ups).
+- suggest_profile_improvements: Suggest improvements to resume or profile based on their goals.
+
+Be concise, encouraging, and actionable. When you receive tool results in the conversation, present them clearly (e.g. list key jobs with title and company). Never make up job titles or companies—only use data from the tool results. If no tool was run yet, invite the user to try "Find jobs that match my profile" or ask about their application status.`;
+
+/** Mock: "scan" job offers (no real JobStreet; returns plausible fake listings for demo). */
+function runScanJobOffers() {
+  const jobs = [
+    { id: '1', title: 'Senior Software Engineer', company: 'TechCorp Singapore', location: 'Singapore', match: '92%', posted: '2 days ago' },
+    { id: '2', title: 'Full Stack Developer', company: 'StartupXYZ', location: 'Remote', match: '88%', posted: '1 day ago' },
+    { id: '3', title: 'Frontend Engineer', company: 'ProductLabs', location: 'Singapore', match: '85%', posted: '3 days ago' },
+    { id: '4', title: 'Software Developer', company: 'FinanceHub', location: 'Singapore / Hybrid', match: '82%', posted: '5 days ago' },
+  ];
+  return { type: 'job_scan', jobs };
+}
+
+/** Mock: application status for the user. */
+function runGetApplicationStatus() {
+  return {
+    type: 'application_status',
+    total: 12,
+    inProgress: 5,
+    interviews: 2,
+    offers: 0,
+    recent: ['TechCorp – Applied 3 days ago', 'StartupXYZ – Screening'],
+  };
+}
+
+/** Mock: profile improvement suggestions. */
+function runSuggestProfileImprovements() {
+  return {
+    type: 'profile_improvements',
+    suggestions: [
+      'Add 2–3 quantifiable achievements to your current role.',
+      'Include keywords from job descriptions (e.g. "React", "Node") in your skills section.',
+      'Keep resume to 1–2 pages for roles with &lt;10 years experience.',
+    ],
+  };
+}
+
+/** Detect which tool to run from the last user message (keyword-based). */
+function getToolToRun(userMessage) {
+  const lower = (userMessage || '').toLowerCase();
+  if (/\b(find|scan|search|show|get|list|match).*job|job.*(match|find|offer|listing)/.test(lower) || /jobs that match|job offer/.test(lower)) return 'scan_job_offers';
+  if (/\b(application|status|applied|follow.?up)\b/.test(lower) || /application status/.test(lower)) return 'get_application_status';
+  if (/\b(improve|suggest|tip|improvement|profile|resume)\b/.test(lower) || /suggest improvement/.test(lower)) return 'suggest_profile_improvements';
+  return null;
+}
+
+/** Run a tool by name and return agentUpdate for frontend. */
+function runTool(name) {
+  switch (name) {
+    case 'scan_job_offers': return runScanJobOffers();
+    case 'get_application_status': return runGetApplicationStatus();
+    case 'suggest_profile_improvements': return runSuggestProfileImprovements();
+    default: return null;
+  }
+}
+
+/** Build Gemini contents from chat history (messages from frontend: { role, content }[]). */
+function buildGeminiContents(messages, currentMessage, toolResultText) {
+  const parts = [];
+  for (const m of messages || []) {
+    const role = m.role === 'user' ? 'user' : 'model';
+    const text = typeof m.content === 'string' ? m.content : '';
+    if (!text.trim()) continue;
+    parts.push({ role, parts: [{ text: text.trim() }] });
+  }
+  parts.push({ role: 'user', parts: [{ text: currentMessage }] });
+  if (toolResultText && toolResultText.trim()) {
+    parts.push({ role: 'model', parts: [{ text: '[Tool result from jobAI backend]\n' + toolResultText.trim() }] });
+    parts.push({ role: 'user', parts: [{ text: 'Summarize the above for the user in a short, friendly reply.' }] });
+  }
+  return parts;
+}
+
+/** Call Gemini API with system prompt and conversation history. */
+async function getGeminiReply(contents, apiKey) {
   if (!apiKey || !apiKey.trim()) return null;
   const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
-  const body = { contents: [{ parts: [{ text: message }] }] };
+  const body = {
+    systemInstruction: { parts: [{ text: JOBAI_SYSTEM_PROMPT }] },
+    contents: contents.map((c) => ({ role: c.role, parts: c.parts })),
+  };
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -245,13 +329,14 @@ async function getGeminiReply(message, apiKey) {
   return typeof text === 'string' ? text.trim() : null;
 }
 
-/** Chat: with Clerk – use key from DB for authenticated user. Without Clerk – use apiKey/encodedKey in body or env. */
+/** Chat: JobAI agent with system prompt; optional history; runs mock tools and returns reply + agentUpdates. */
 app.post('/api/chat', async (req, res) => {
   console.log('\n[CHAT] <<< Received from frontend');
   const message = req.body?.message;
   if (typeof message !== 'string' || !message.trim()) {
     return res.status(400).json({ error: 'message required' });
   }
+  const history = Array.isArray(req.body?.messages) ? req.body.messages : [];
   let apiKey = null;
   if (hasClerk && getAuth(req).userId) {
     const userId = getAuth(req).userId;
@@ -266,12 +351,31 @@ app.post('/api/chat', async (req, res) => {
     else apiKey = (process.env.GEMINI_API_KEY || '').trim();
   }
   console.log('[CHAT] message from frontend: "%s"', message.trim().slice(0, 200));
+
+  const agentUpdates = [];
+  let toolResultText = '';
+  const toolName = getToolToRun(message);
+  if (toolName) {
+    const update = runTool(toolName);
+    if (update) {
+      agentUpdates.push(update);
+      if (update.type === 'job_scan' && update.jobs) {
+        toolResultText = 'Job scan results:\n' + update.jobs.map((j) => `- ${j.title} at ${j.company} (${j.location}) – match ${j.match}`).join('\n');
+      } else if (update.type === 'application_status') {
+        toolResultText = `Application status: ${update.total} total, ${update.inProgress} in progress, ${update.interviews} interviews. Recent: ${(update.recent || []).join('; ')}`;
+      } else if (update.type === 'profile_improvements' && update.suggestions) {
+        toolResultText = 'Profile improvement suggestions:\n' + update.suggestions.map((s, i) => `${i + 1}. ${s}`).join('\n');
+      }
+    }
+  }
+
+  const contents = buildGeminiContents(history, message.trim(), toolResultText);
   let reply = 'No response';
-  const geminiReply = await getGeminiReply(message.trim(), apiKey);
+  const geminiReply = await getGeminiReply(contents, apiKey);
   if (geminiReply) reply = geminiReply;
   else if (!apiKey) console.log('[CHAT] No API key (set in Settings when using Clerk, or send apiKey/env)');
-  console.log('[CHAT] >>> Sending reply to frontend: "%s"\n', reply.slice(0, 200));
-  return res.json({ reply });
+  console.log('[CHAT] >>> Sending reply + %d agentUpdate(s) to frontend\n', agentUpdates.length);
+  return res.json({ reply, agentUpdates: agentUpdates.length ? agentUpdates : undefined });
 });
 
 /** Resume upload: frontend sends file, backend saves to local uploads/ and logs */
