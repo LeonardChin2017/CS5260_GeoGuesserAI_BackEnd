@@ -522,7 +522,9 @@ function buildUserProfileContext(extractedProfileJson, resumeText) {
   return '';
 }
 
-/** Call Gemini API with system prompt and conversation history. */
+/** Call Gemini API with system prompt and conversation history.
+ * @returns {Promise<null|{ reply: string|null, errorCode?: 'quota'|'invalid' }>} reply text, or null/error object on failure
+ */
 async function getGeminiReply(contents, apiKey, userProfileContext = '') {
   if (!apiKey || !apiKey.trim()) return null;
   const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
@@ -537,14 +539,35 @@ async function getGeminiReply(contents, apiKey, userProfileContext = '') {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  const errText = await res.text();
   if (!res.ok) {
-    const err = await res.text();
-    console.log('[CHAT] Gemini API error:', res.status, err?.slice(0, 300));
-    return null;
+    console.log('[CHAT] Gemini API error:', res.status, errText?.slice(0, 400));
+    if (res.status === 429) {
+      let errBody;
+      try {
+        errBody = JSON.parse(errText);
+      } catch {
+        errBody = {};
+      }
+      const status = errBody?.error?.status || errBody?.error?.code;
+      const isQuota = res.status === 429 || status === 'RESOURCE_EXHAUSTED' || (typeof status === 'number' && status === 429);
+      if (isQuota) {
+        return { reply: null, errorCode: 'quota' };
+      }
+    }
+    return { reply: null, errorCode: 'invalid' };
   }
-  const data = await res.json();
+  let data;
+  try {
+    data = JSON.parse(errText);
+  } catch {
+    return { reply: null, errorCode: 'invalid' };
+  }
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  return typeof text === 'string' ? text.trim() : null;
+  if (typeof text === 'string' && text.trim()) {
+    return { reply: text.trim() };
+  }
+  return { reply: null, errorCode: 'invalid' };
 }
 
 /** Strip common markdown so the frontend (plain text) does not show ** or *. */
@@ -617,11 +640,17 @@ app.post('/api/chat', async (req, res) => {
     reply = "I couldn't generate a response. Please add your Gemini API key in Settings (sidebar → Settings) and try again.";
     console.log('[CHAT] No API key – user should set key in Settings or send apiKey');
   } else {
-    const geminiReply = await getGeminiReply(contents, apiKey, userProfileContext);
-    if (geminiReply) reply = stripMarkdown(geminiReply);
-    else {
-      reply = "I couldn't generate a response. Your API key may be invalid or expired—check Settings and try again. If it was working before, the key might need to be re-entered.";
-      console.log('[CHAT] Gemini returned no reply (API error or rate limit)');
+    const result = await getGeminiReply(contents, apiKey, userProfileContext);
+    if (result && typeof result.reply === 'string') {
+      reply = stripMarkdown(result.reply);
+    } else if (result && result.errorCode === 'quota') {
+      reply =
+        "I couldn't generate a response. You've hit the Gemini API rate limit or quota. Check your plan and billing at https://ai.google.dev/gemini-api/docs/rate-limits or try again in a minute.";
+      console.log('[CHAT] Gemini quota exceeded (429 / RESOURCE_EXHAUSTED)');
+    } else {
+      reply =
+        "I couldn't generate a response. Your API key may be invalid or expired—check Settings and try again. If it was working before, the key might need to be re-entered.";
+      console.log('[CHAT] Gemini returned no reply (API error or invalid key)');
     }
   }
   recordBackendActivity(req, { source: 'chat', type: 'done', message: 'Reply sent to frontend' });
