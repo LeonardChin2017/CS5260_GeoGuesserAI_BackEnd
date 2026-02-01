@@ -156,6 +156,15 @@ if (hasClerk) {
     ).run(userId, encrypted, now, encrypted, now);
     res.json({ ok: true });
   });
+
+  /** Clear user's saved Gemini API key (Clerk auth required). */
+  app.delete('/api/user/gemini-key', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const userId = auth.userId;
+    db.prepare('DELETE FROM user_gemini_keys WHERE user_id = ?').run(userId);
+    res.json({ ok: true });
+  });
 }
 
 /** Call Gemini API for chat reply. apiKey can be raw string (legacy) or from DB (Clerk). */
