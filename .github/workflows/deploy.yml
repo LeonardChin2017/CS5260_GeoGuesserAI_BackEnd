@@ -16,8 +16,9 @@ jobs:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
+          known_hosts: ${{ secrets.DO_HOST }}
           script: |
             cd ${{ secrets.DO_APP_PATH }}
             git pull origin master
             npm install
-            pm2 restart jobai-backend
+            pm2 reload jobai-backend
