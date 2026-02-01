@@ -80,6 +80,20 @@ db.exec(`
   )
 `);
 db.exec(`
+  CREATE TABLE IF NOT EXISTS user_deepseek_keys (
+    user_id TEXT PRIMARY KEY,
+    encrypted_key TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_llm_preference (
+    user_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+db.exec(`
   CREATE TABLE IF NOT EXISTS user_chat (
     user_id TEXT PRIMARY KEY,
     messages TEXT NOT NULL,
@@ -332,6 +346,58 @@ if (hasClerk) {
     res.json({ ok: true });
   });
 
+  app.get('/api/user/deepseek-key', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const row = db.prepare('SELECT 1 FROM user_deepseek_keys WHERE user_id = ?').get(auth.userId);
+    res.json({ hasKey: !!row });
+  });
+
+  app.put('/api/user/deepseek-key', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const userId = auth.userId;
+    if (!hasEncryptionSecret()) return res.status(503).json({ error: 'ENCRYPTION_SECRET not set' });
+    const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+    if (!apiKey) return res.status(400).json({ error: 'apiKey required' });
+    const encrypted = encryptForDb(apiKey);
+    if (!encrypted) return res.status(500).json({ error: 'Failed to encrypt key' });
+    const now = new Date().toISOString();
+    db.prepare(
+      'INSERT INTO user_deepseek_keys (user_id, encrypted_key, updated_at) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET encrypted_key = ?, updated_at = ?'
+    ).run(userId, encrypted, now, encrypted, now);
+    res.json({ ok: true });
+  });
+
+  app.delete('/api/user/deepseek-key', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const userId = auth.userId;
+    db.prepare('DELETE FROM user_deepseek_keys WHERE user_id = ?').run(userId);
+    res.json({ ok: true });
+  });
+
+  app.get('/api/user/llm-provider', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const row = db.prepare('SELECT provider FROM user_llm_preference WHERE user_id = ?').get(auth.userId);
+    const provider = row?.provider === 'deepseek' ? 'deepseek' : 'gemini';
+    res.json({ provider });
+  });
+
+  app.put('/api/user/llm-provider', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const userId = auth.userId;
+    const raw = typeof req.body?.provider === 'string' ? req.body.provider.trim().toLowerCase() : '';
+    const provider = raw === 'deepseek' ? 'deepseek' : 'gemini';
+    const now = new Date().toISOString();
+    db.prepare(
+      'INSERT INTO user_llm_preference (user_id, provider, updated_at) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET provider = ?, updated_at = ?'
+    ).run(userId, provider, now, provider, now);
+    res.json({ ok: true, provider });
+  });
+
   /** Get user's chat history (Clerk auth required). Returns { messages: Message[] }. */
   app.get('/api/user/chat', (req, res) => {
     const auth = getAuth(req);
@@ -570,6 +636,59 @@ async function getGeminiReply(contents, apiKey, userProfileContext = '') {
   return { reply: null, errorCode: 'invalid' };
 }
 
+/** Call DeepSeek API (OpenAI-compatible). contents = array of { role, parts: [{ text }] }; userProfileContext = system prompt suffix.
+ * @returns {Promise<null|{ reply: string|null, errorCode?: 'quota'|'invalid' }>}
+ */
+async function getDeepSeekReply(contents, apiKey, userProfileContext = '') {
+  if (!apiKey || !apiKey.trim()) return null;
+  const systemText = JOBAI_SYSTEM_PROMPT + (userProfileContext || '');
+  const messages = [{ role: 'system', content: systemText }];
+  for (const c of contents || []) {
+    const role = c.role === 'model' ? 'assistant' : 'user';
+    const text = c.parts?.[0]?.text;
+    if (typeof text === 'string' && text.trim()) {
+      messages.push({ role, content: text.trim() });
+    }
+  }
+  const url = 'https://api.deepseek.com/v1/chat/completions';
+  const body = { model: process.env.DEEPSEEK_MODEL || 'deepseek-chat', messages };
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey.trim()}`,
+    },
+    body: JSON.stringify(body),
+  });
+  const errText = await res.text();
+  if (!res.ok) {
+    console.log('[CHAT] DeepSeek API error:', res.status, errText?.slice(0, 400));
+    if (res.status === 429) {
+      let errBody;
+      try {
+        errBody = JSON.parse(errText);
+      } catch {
+        errBody = {};
+      }
+      const code = errBody?.error?.code || errBody?.error?.type;
+      const isQuota = res.status === 429 || code === 'rate_limit_exceeded' || code === 'insufficient_quota';
+      if (isQuota) return { reply: null, errorCode: 'quota' };
+    }
+    return { reply: null, errorCode: 'invalid' };
+  }
+  let data;
+  try {
+    data = JSON.parse(errText);
+  } catch {
+    return { reply: null, errorCode: 'invalid' };
+  }
+  const text = data?.choices?.[0]?.message?.content;
+  if (typeof text === 'string' && text.trim()) {
+    return { reply: text.trim() };
+  }
+  return { reply: null, errorCode: 'invalid' };
+}
+
 /** Strip common markdown so the frontend (plain text) does not show ** or *. */
 function stripMarkdown(text) {
   if (typeof text !== 'string') return text;
@@ -590,20 +709,40 @@ app.post('/api/chat', async (req, res) => {
     return res.status(400).json({ error: 'message required' });
   }
   const history = Array.isArray(req.body?.messages) ? req.body.messages : [];
+  const bodyProvider = typeof req.body?.llmProvider === 'string' ? req.body.llmProvider.trim().toLowerCase() : '';
+  let provider = bodyProvider === 'deepseek' ? 'deepseek' : 'gemini';
   let apiKey = null;
   if (hasClerk && getAuth(req).userId) {
     const userId = getAuth(req).userId;
-    const row = db.prepare('SELECT encrypted_key FROM user_gemini_keys WHERE user_id = ?').get(userId);
-    if (row && row.encrypted_key) apiKey = decryptFromDb(row.encrypted_key);
+    const prefRow = db.prepare('SELECT provider FROM user_llm_preference WHERE user_id = ?').get(userId);
+    if (prefRow?.provider === 'deepseek') provider = 'deepseek';
+    if (provider === 'deepseek') {
+      const row = db.prepare('SELECT encrypted_key FROM user_deepseek_keys WHERE user_id = ?').get(userId);
+      if (row?.encrypted_key) apiKey = decryptFromDb(row.encrypted_key);
+    }
+    if (!apiKey) {
+      const row = db.prepare('SELECT encrypted_key FROM user_gemini_keys WHERE user_id = ?').get(userId);
+      if (row?.encrypted_key) apiKey = decryptFromDb(row.encrypted_key);
+      provider = 'gemini';
+    }
   }
   if (!apiKey) {
     const raw = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
     const encoded = typeof req.body?.encodedKey === 'string' ? req.body.encodedKey : null;
-    if (raw) apiKey = raw;
-    else if (encoded) apiKey = decodeGeminiKey(encoded) || '';
-    else apiKey = (process.env.GEMINI_API_KEY || '').trim();
+    if (bodyProvider === 'deepseek' && raw) {
+      provider = 'deepseek';
+      apiKey = raw;
+    } else if (raw) {
+      apiKey = raw;
+    } else if (encoded) {
+      apiKey = decodeGeminiKey(encoded) || '';
+    } else {
+      apiKey = provider === 'deepseek'
+        ? (process.env.DEEPSEEK_API_KEY || '').trim()
+        : (process.env.GEMINI_API_KEY || '').trim();
+    }
   }
-  console.log('[CHAT] message from frontend: "%s"', message.trim().slice(0, 200));
+  console.log('[CHAT] provider:', provider, 'message from frontend: "%s"', message.trim().slice(0, 200));
 
   const agentUpdates = [];
   let toolCall = null;
@@ -637,20 +776,25 @@ app.post('/api/chat', async (req, res) => {
   }
   let reply = 'No response';
   if (!apiKey || !apiKey.trim()) {
-    reply = "I couldn't generate a response. Please add your Gemini API key in Settings (sidebar → Settings) and try again.";
+    reply = "I couldn't generate a response. Please add your API key in Settings (sidebar → Settings) for the selected provider (Gemini or DeepSeek) and try again.";
     console.log('[CHAT] No API key – user should set key in Settings or send apiKey');
   } else {
-    const result = await getGeminiReply(contents, apiKey, userProfileContext);
+    const result =
+      provider === 'deepseek'
+        ? await getDeepSeekReply(contents, apiKey, userProfileContext)
+        : await getGeminiReply(contents, apiKey, userProfileContext);
     if (result && typeof result.reply === 'string') {
       reply = stripMarkdown(result.reply);
     } else if (result && result.errorCode === 'quota') {
       reply =
-        "I couldn't generate a response. You've hit the Gemini API rate limit or quota. Check your plan and billing at https://ai.google.dev/gemini-api/docs/rate-limits or try again in a minute.";
-      console.log('[CHAT] Gemini quota exceeded (429 / RESOURCE_EXHAUSTED)');
+        provider === 'deepseek'
+          ? "I couldn't generate a response. You've hit the DeepSeek API rate limit or quota. Try again in a minute or check your plan."
+          : "I couldn't generate a response. You've hit the Gemini API rate limit or quota. Check your plan and billing at https://ai.google.dev/gemini-api/docs/rate-limits or try again in a minute.";
+      console.log('[CHAT]', provider, 'quota exceeded');
     } else {
       reply =
         "I couldn't generate a response. Your API key may be invalid or expired—check Settings and try again. If it was working before, the key might need to be re-entered.";
-      console.log('[CHAT] Gemini returned no reply (API error or invalid key)');
+      console.log('[CHAT]', provider, 'returned no reply (API error or invalid key)');
     }
   }
   recordBackendActivity(req, { source: 'chat', type: 'done', message: 'Reply sent to frontend' });
