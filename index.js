@@ -613,9 +613,17 @@ app.post('/api/chat', async (req, res) => {
     // and append to userProfileContext so the agent can use it as a data resource. No implementation yet.
   }
   let reply = 'No response';
-  const geminiReply = await getGeminiReply(contents, apiKey, userProfileContext);
-  if (geminiReply) reply = stripMarkdown(geminiReply);
-  else if (!apiKey) console.log('[CHAT] No API key (set in Settings when using Clerk, or send apiKey/env)');
+  if (!apiKey || !apiKey.trim()) {
+    reply = "I couldn't generate a response. Please add your Gemini API key in Settings (sidebar → Settings) and try again.";
+    console.log('[CHAT] No API key – user should set key in Settings or send apiKey');
+  } else {
+    const geminiReply = await getGeminiReply(contents, apiKey, userProfileContext);
+    if (geminiReply) reply = stripMarkdown(geminiReply);
+    else {
+      reply = "I couldn't generate a response. Your API key may be invalid or expired—check Settings and try again. If it was working before, the key might need to be re-entered.";
+      console.log('[CHAT] Gemini returned no reply (API error or rate limit)');
+    }
+  }
   recordBackendActivity(req, { source: 'chat', type: 'done', message: 'Reply sent to frontend' });
   console.log('[CHAT] >>> Sending reply + %d agentUpdate(s) to frontend\n', agentUpdates.length);
   return res.json({
