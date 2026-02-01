@@ -8,7 +8,7 @@ echo "=============================="
 cd /srv/jobai
 
 echo "Pulling latest code..."
-git pull origin main
+git pull origin master
 
 echo "Installing dependencies..."
 npm install --production
