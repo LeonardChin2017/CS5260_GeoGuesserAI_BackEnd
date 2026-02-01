@@ -138,11 +138,14 @@ function normalizeExtractedProfile(obj) {
  */
 async function extractResumeProfile(absoluteFilePath, apiKey, onStep) {
   if (typeof onStep === 'function') {
-    onStep({ type: 'tool_call', agent: 'Parser agent', message: 'Reading PDF with extract-text tool', status: 'running' });
+    onStep({ type: 'tool_call', agent: 'Parser', message: 'Reading PDF with extract-text tool', status: 'running' });
   }
   const text = await extractTextFromPdf(absoluteFilePath);
   if (typeof onStep === 'function') {
-    onStep({ type: 'tool_call', agent: 'Parser agent', message: 'Extracted text from document', status: text && text.length >= 10 ? 'done' : 'done' });
+    const msg = text && text.length >= 10
+      ? `Extracted text from document (${text.length} chars)`
+      : 'Extracted text from document';
+    onStep({ type: 'tool_call', agent: 'Parser', message: msg, status: 'done' });
   }
   if (!text || text.length < 10) {
     console.log('[RESUME] No PDF text extracted (or not PDF)');
@@ -150,11 +153,12 @@ async function extractResumeProfile(absoluteFilePath, apiKey, onStep) {
   }
   console.log('[RESUME] Extracted', text.length, 'chars from PDF');
   if (typeof onStep === 'function') {
-    onStep({ type: 'agent_step', agent: 'Profile agent', message: 'Analyzing resume with AI', status: 'running' });
+    onStep({ type: 'agent_step', agent: 'Profile', message: 'Analyzing resume with AI', status: 'running' });
   }
   const result = await analyzeResumeWithGemini(text, apiKey);
   if (typeof onStep === 'function') {
-    onStep({ type: 'agent_step', agent: 'Profile agent', message: 'Extracted profile (name, contact, skills)', status: result ? 'done' : 'done' });
+    const msg = result ? 'Extracted profile (name, contact, skills)' : 'Profile extraction finished';
+    onStep({ type: 'agent_step', agent: 'Profile', message: msg, status: 'done' });
   }
   if (!result) return null;
   return { ...result, resumeText: text };

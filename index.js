@@ -568,11 +568,9 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
   }
   const activityEvents = [];
   if (apiKey) {
-    pushActivityEvent(activityEvents, { type: 'planning', message: 'Planning extraction', status: 'done' });
     pushActivityEvent(activityEvents, {
       type: 'agent_step',
-      agent: 'Orchestrator',
-      message: originalName ? `Received resume "${originalName}"` : 'Received resume',
+      message: originalName ? `Received resume upload: ${originalName}` : 'Received resume upload',
       status: 'done',
     });
     try {
@@ -581,8 +579,11 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
         extracted = result.profile;
         greeting = result.greeting || null;
         const resumeText = result.resumeText || null;
-        pushActivityEvent(activityEvents, { type: 'agent_step', agent: 'Preferences agent', message: 'Inferred job preferences', status: 'done' });
-        pushActivityEvent(activityEvents, { type: 'done', agent: '—', message: 'Ready for follow-up questions in chat', status: 'done' });
+        pushActivityEvent(activityEvents, {
+          type: 'done',
+          message: 'Extraction complete. Ready for follow-up in chat.',
+          status: 'done',
+        });
         if (extracted && hasClerk && getAuth(req)?.userId) {
           console.log('[RESUME] Agent extracted profile for', originalName);
           db.prepare('UPDATE user_resume SET extracted_profile = ?, resume_text = ?, activity_steps = ? WHERE user_id = ?').run(
