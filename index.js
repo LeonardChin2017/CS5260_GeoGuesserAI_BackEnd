@@ -244,6 +244,18 @@ app.get('/api/hello', (req, res) => {
   res.json({ message: 'Hello from jobAI backend', env: process.env.NODE_ENV || 'development' });
 });
 
+/** Debug: check if backend has activity data. GET /api/debug/activity to see recent backend_activity rows. No auth required. (formatBackendActivityAsStep is defined later in file.) */
+app.get('/api/debug/activity', (req, res) => {
+  const limit = Math.min(parseInt(req.query?.limit, 10) || 10, 50);
+  const rows = db.prepare('SELECT id, user_id, source, type, message, payload, created_at FROM backend_activity ORDER BY id DESC LIMIT ?').all(limit);
+  res.json({
+    debug: true,
+    backend_activity_count: rows.length,
+    backend_activity_recent: rows.map((r) => ({ id: r.id, source: r.source, type: r.type, message: r.message, created_at: r.created_at })),
+    note: 'Activity steps are in POST /api/resume/upload response (activitySteps) and GET /api/resume (activitySteps). Backend logs: [RESUME] >>> Sending response: activitySteps count.',
+  });
+});
+
 /** Get recent backend activity (what the backend/agents did). For frontend "agent activity" panel. With Clerk: returns activities for current user (empty if not authenticated). Without Clerk: returns anonymous activities. */
 app.get('/api/backend-activity', (req, res) => {
   const userId = hasClerk && typeof getAuth === 'function' && getAuth(req)?.userId ? getAuth(req).userId : null;
