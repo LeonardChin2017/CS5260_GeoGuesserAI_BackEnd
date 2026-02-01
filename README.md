@@ -87,8 +87,8 @@ After deploy, set the frontend `VITE_API_URL` to your backend URL (e.g. `https:/
 - **Known limitation**  
   There is a **pending fix**: resume info is not always retrieved correctly (extraction/parsing). See TODOs in `resume-extract.js` and the resume upload handler in `index.js`.
 
-- **Resume extraction activity (output history)**  
-  The backend stores the resume extraction “output history” (Orchestrator → Parser agent → Profile agent → Preferences agent → Ready for follow-up) in `user_resume.activity_steps` (JSON). It is returned as `activitySteps` from **GET /api/resume** and from **POST /api/resume/upload** when extraction completes. The frontend fetches and displays this; it does not build or store the history locally.
+- **Resume extraction activity (Cursor-like event stream)**  
+  The backend builds and stores an **activity event stream** during resume upload (planning → Orchestrator → tool/agent steps → Preferences → Ready). Each event has `type` (`planning` | `tool_call` | `agent_step` | `done`), optional `agent`, `message`, `status` (`pending` | `running` | `done`), and optional `timestamp`. Stored in `user_resume.activity_steps` (JSON array). Returned as `activitySteps` from **GET /api/resume** and **POST /api/resume/upload**. The frontend fetches and displays this stream (icons by type, agent badge, message, timestamp); it does not build or store the history locally.
 
 ---
 

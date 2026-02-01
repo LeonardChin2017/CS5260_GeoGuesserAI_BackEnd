@@ -509,16 +509,16 @@ app.post('/api/chat', async (req, res) => {
   });
 });
 
-/** Resume extraction activity steps (orchestrator → parser → profile → preferences → ready). Stored on backend; frontend fetches and displays. */
-function buildResumeActivityStepsDone(originalName) {
-  const name = originalName ? ` "${originalName}"` : '';
-  return [
-    { id: 'orchestrator', agent: 'Orchestrator', message: `Received resume${name}`, status: 'done' },
-    { id: 'parser', agent: 'Parser agent', message: 'Extracted text from document', status: 'done' },
-    { id: 'profile', agent: 'Profile agent', message: 'Extracted profile (name, contact, skills)', status: 'done' },
-    { id: 'preferences', agent: 'Preferences agent', message: 'Inferred job preferences', status: 'done' },
-    { id: 'done', agent: '—', message: 'Ready for follow-up questions in chat', status: 'done' },
-  ];
+/** Push one activity event (Cursor-like stream). type: planning | tool_call | agent_step | done. Backend stores; frontend displays. */
+function pushActivityEvent(events, event) {
+  events.push({
+    id: String(events.length + 1),
+    type: event.type || 'agent_step',
+    agent: event.agent,
+    message: event.message,
+    status: event.status || 'done',
+    timestamp: event.timestamp || new Date().toISOString(),
+  });
 }
 
 /** Resume upload: saves file, then MCP-style extract (PDF text + Gemini) and returns extracted profile when possible.
@@ -566,20 +566,29 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
     const row = db.prepare('SELECT encrypted_key FROM user_gemini_keys WHERE user_id = ?').get(getAuth(req).userId);
     if (row?.encrypted_key) apiKey = decryptFromDb(row.encrypted_key) || apiKey;
   }
+  const activityEvents = [];
   if (apiKey) {
+    pushActivityEvent(activityEvents, { type: 'planning', message: 'Planning extraction', status: 'done' });
+    pushActivityEvent(activityEvents, {
+      type: 'agent_step',
+      agent: 'Orchestrator',
+      message: originalName ? `Received resume "${originalName}"` : 'Received resume',
+      status: 'done',
+    });
     try {
-      const result = await extractResumeProfile(absolutePath, apiKey);
+      const result = await extractResumeProfile(absolutePath, apiKey, (ev) => pushActivityEvent(activityEvents, ev));
       if (result) {
         extracted = result.profile;
         greeting = result.greeting || null;
         const resumeText = result.resumeText || null;
+        pushActivityEvent(activityEvents, { type: 'agent_step', agent: 'Preferences agent', message: 'Inferred job preferences', status: 'done' });
+        pushActivityEvent(activityEvents, { type: 'done', agent: '—', message: 'Ready for follow-up questions in chat', status: 'done' });
         if (extracted && hasClerk && getAuth(req)?.userId) {
           console.log('[RESUME] Agent extracted profile for', originalName);
-          const activitySteps = buildResumeActivityStepsDone(originalName);
           db.prepare('UPDATE user_resume SET extracted_profile = ?, resume_text = ?, activity_steps = ? WHERE user_id = ?').run(
             JSON.stringify(extracted),
             resumeText ? resumeText.slice(0, 50000) : null,
-            JSON.stringify(activitySteps),
+            JSON.stringify(activityEvents),
             getAuth(req).userId
           );
         }
@@ -595,9 +604,7 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
     console.log('[RESUME] No Gemini API key – skip extraction (set in Settings or GEMINI_API_KEY)');
   }
 
-  const activityStepsForResponse = hasClerk && getAuth(req)?.userId && extracted
-    ? buildResumeActivityStepsDone(originalName)
-    : undefined;
+  const activityStepsForResponse = activityEvents.length > 0 ? activityEvents : undefined;
   res.json({
     ok: true,
     savedPath: fileName,

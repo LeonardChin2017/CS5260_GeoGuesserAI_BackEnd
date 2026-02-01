@@ -133,16 +133,29 @@ function normalizeExtractedProfile(obj) {
  * MCP-style pipeline: extract text (PDF tool) then agent analysis.
  * @param {string} absoluteFilePath - Full path to the saved resume file
  * @param {string} apiKey - Gemini API key
+ * @param {(event: { type: string, agent?: string, message: string, status: string }) => void} [onStep] - Optional callback for activity stream (Cursor-like)
  * @returns {Promise<{ profile: object, greeting: string|null, resumeText: string }|null>} Profile, greeting, and raw resume text for chat context
  */
-async function extractResumeProfile(absoluteFilePath, apiKey) {
+async function extractResumeProfile(absoluteFilePath, apiKey, onStep) {
+  if (typeof onStep === 'function') {
+    onStep({ type: 'tool_call', agent: 'Parser agent', message: 'Reading PDF with extract-text tool', status: 'running' });
+  }
   const text = await extractTextFromPdf(absoluteFilePath);
+  if (typeof onStep === 'function') {
+    onStep({ type: 'tool_call', agent: 'Parser agent', message: 'Extracted text from document', status: text && text.length >= 10 ? 'done' : 'done' });
+  }
   if (!text || text.length < 10) {
     console.log('[RESUME] No PDF text extracted (or not PDF)');
     return null;
   }
   console.log('[RESUME] Extracted', text.length, 'chars from PDF');
+  if (typeof onStep === 'function') {
+    onStep({ type: 'agent_step', agent: 'Profile agent', message: 'Analyzing resume with AI', status: 'running' });
+  }
   const result = await analyzeResumeWithGemini(text, apiKey);
+  if (typeof onStep === 'function') {
+    onStep({ type: 'agent_step', agent: 'Profile agent', message: 'Extracted profile (name, contact, skills)', status: result ? 'done' : 'done' });
+  }
   if (!result) return null;
   return { ...result, resumeText: text };
 }
