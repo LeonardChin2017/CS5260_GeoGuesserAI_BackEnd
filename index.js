@@ -239,17 +239,39 @@ app.get('/health', (req, res) => {
   res.json({ ok: true, service: 'jobai-backend', timestamp: new Date().toISOString() });
 });
 
-/** Simple hello – for testing connectivity. Add ?debug=activity to get recent backend_activity (works even if /api/debug/activity is not deployed). */
+/** Simple hello – for testing connectivity. Add ?debug=activity or ?debug=full for full debug trace. */
 app.get('/api/hello', (req, res) => {
-  if (req.query?.debug === 'activity') {
-    const limit = Math.min(parseInt(req.query?.limit, 10) || 10, 50);
-    const rows = db.prepare('SELECT id, user_id, source, type, message, created_at FROM backend_activity ORDER BY id DESC LIMIT ?').all(limit);
-    return res.json({
+  const debug = req.query?.debug;
+  if (debug === 'activity' || debug === 'full') {
+    const limit = Math.min(parseInt(req.query?.limit, 10) || 50, 100);
+    let rows = [];
+    try {
+      rows = db.prepare('SELECT id, user_id, source, type, message, payload, created_at FROM backend_activity ORDER BY id DESC LIMIT ?').all(limit);
+    } catch (e) {
+      rows = [];
+    }
+    const trace = {
       debug: true,
+      timestamp: new Date().toISOString(),
       backend_activity_count: rows.length,
-      backend_activity_recent: rows.map((r) => ({ id: r.id, source: r.source, type: r.type, message: r.message, created_at: r.created_at })),
-      note: 'Activity steps are in POST /api/resume/upload (activitySteps) and GET /api/resume (activitySteps).',
-    });
+      backend_activity_recent: rows.map((r) => ({
+        id: r.id,
+        user_id: r.user_id,
+        source: r.source,
+        type: r.type,
+        message: r.message,
+        payload: r.payload ? (() => { try { return JSON.parse(r.payload); } catch { return r.payload; } })() : null,
+        created_at: r.created_at,
+      })),
+      note: 'Activity steps are returned in POST /api/resume/upload (activitySteps) and GET /api/resume (activitySteps). Check server log for [RESUME] >>> Sending response: activitySteps count.',
+    };
+    if (debug === 'full') {
+      trace.env = process.env.NODE_ENV || 'development';
+      trace.port = process.env.PORT || 3001;
+      trace.hasClerk = !!hasClerk;
+      trace.request = { method: req.method, path: req.path, query: req.query };
+    }
+    return res.json(trace);
   }
   res.json({ message: 'Hello from jobAI backend', env: process.env.NODE_ENV || 'development' });
 });
