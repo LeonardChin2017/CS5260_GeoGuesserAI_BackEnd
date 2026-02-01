@@ -79,7 +79,14 @@ db.exec(`
     updated_at TEXT NOT NULL
   )
 `);
-if (hasClerk) console.log('[BACKEND] Clerk + DB: user Gemini keys stored in', DB_PATH);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_chat (
+    user_id TEXT PRIMARY KEY,
+    messages TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+if (hasClerk) console.log('[BACKEND] Clerk + DB: user Gemini keys and chat stored in', DB_PATH);
 
 // Directory for uploaded resumes (create if missing)
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
@@ -171,6 +178,48 @@ if (hasClerk) {
     if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
     const userId = auth.userId;
     db.prepare('DELETE FROM user_gemini_keys WHERE user_id = ?').run(userId);
+    res.json({ ok: true });
+  });
+
+  /** Get user's chat history (Clerk auth required). Returns { messages: Message[] }. */
+  app.get('/api/user/chat', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const userId = auth.userId;
+    const row = db.prepare('SELECT messages FROM user_chat WHERE user_id = ?').get(userId);
+    let messages = [];
+    if (row && row.messages) {
+      try {
+        messages = JSON.parse(row.messages);
+        if (!Array.isArray(messages)) messages = [];
+      } catch {
+        messages = [];
+      }
+    }
+    res.json({ messages });
+  });
+
+  /** Save user's chat history (Clerk auth required). Body { messages: Array<{ id, role, content, timestamp }> }. */
+  app.post('/api/user/chat', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const userId = auth.userId;
+    const messages = req.body?.messages;
+    if (!Array.isArray(messages)) return res.status(400).json({ error: 'messages array required' });
+    const now = new Date().toISOString();
+    const json = JSON.stringify(messages);
+    db.prepare(
+      'INSERT INTO user_chat (user_id, messages, updated_at) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET messages = ?, updated_at = ?'
+    ).run(userId, json, now, json, now);
+    res.json({ ok: true });
+  });
+
+  /** Clear user's chat history (Clerk auth required). */
+  app.delete('/api/user/chat', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const userId = auth.userId;
+    db.prepare('DELETE FROM user_chat WHERE user_id = ?').run(userId);
     res.json({ ok: true });
   });
 }

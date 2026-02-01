@@ -58,6 +58,9 @@ After deploy, set the frontend `VITE_API_URL` to your backend URL (e.g. `https:/
 | `/api/user/gemini-key` | GET | Check if user has a key saved. Response `{ hasKey: true|false }` (Clerk auth required). |
 | `/api/user/gemini-key` | PUT | Save user's Gemini API key (Clerk auth required). Body `{ apiKey }`. Key stored encrypted in DB. |
 | `/api/user/gemini-key` | DELETE | Clear user's saved Gemini API key (Clerk auth required). |
+| `/api/user/chat` | GET | Get user's chat history. Response `{ messages: Message[] }` (Clerk auth required). |
+| `/api/user/chat` | POST | Save user's chat history. Body `{ messages: Message[] }` (Clerk auth required). |
+| `/api/user/chat` | DELETE | Clear user's chat history (Clerk auth required). |
 | `/api/chat` | POST | Chat: with Clerk auth uses key from DB; otherwise body `{ message, apiKey? }`. Response `{ reply }`. |
 | `/api/resume/upload` | POST | Resume upload: multipart file, response `{ ok, savedPath, originalName }` |
 
