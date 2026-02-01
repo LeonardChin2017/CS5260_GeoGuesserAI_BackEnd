@@ -106,7 +106,14 @@ try {
 } catch (e) {
   if (!/duplicate column/i.test(e.message)) throw e;
 }
-if (hasClerk) console.log('[BACKEND] Clerk + DB: user Gemini keys, chat, and resume stored in', DB_PATH);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_links (
+    user_id TEXT PRIMARY KEY,
+    links TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+if (hasClerk) console.log('[BACKEND] Clerk + DB: user Gemini keys, chat, resume, and links stored in', DB_PATH);
 
 // Directory for uploaded resumes (create if missing)
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
@@ -482,6 +489,8 @@ app.post('/api/chat', async (req, res) => {
     if (resumeRow && (resumeRow.resume_text || resumeRow.extracted_profile)) {
       userProfileContext = buildUserProfileContext(resumeRow.extracted_profile, resumeRow.resume_text);
     }
+    // PLACEHOLDER (teammate): Load user links from user_links table, extract info from each URL (e.g. LinkedIn, portfolio),
+    // and append to userProfileContext so the agent can use it as a data resource. No implementation yet.
   }
   let reply = 'No response';
   const geminiReply = await getGeminiReply(contents, apiKey, userProfileContext);
@@ -495,7 +504,9 @@ app.post('/api/chat', async (req, res) => {
   });
 });
 
-/** Resume upload: saves file, then MCP-style extract (PDF text + Gemini) and returns extracted profile when possible. */
+/** Resume upload: saves file, then MCP-style extract (PDF text + Gemini) and returns extracted profile when possible.
+ *  TODO: Pending fix – resume info cannot be retrieved correctly in all cases; backend agent may not get full profile.
+ */
 const { extractResumeProfile } = require('./resume-extract');
 
 app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
@@ -595,6 +606,38 @@ if (hasClerk) {
     db.prepare('DELETE FROM user_resume WHERE user_id = ?').run(auth.userId);
     console.log('[RESUME] deleted for user %s\n', auth.userId);
     res.json({ ok: true });
+  });
+
+  /** Get current user's links (Clerk required). Returns { links: string[] }. Used by agent as data resource – teammate: implement extraction and inject into agent context. */
+  app.get('/api/user/links', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const row = db.prepare('SELECT links FROM user_links WHERE user_id = ?').get(auth.userId);
+    let links = [];
+    if (row && row.links) {
+      try {
+        links = JSON.parse(row.links);
+        if (!Array.isArray(links)) links = [];
+      } catch {
+        links = [];
+      }
+    }
+    res.json({ links });
+  });
+
+  /** Save current user's links (Clerk required). Body { links: string[] }. Frontend sends these; backend stores only. Teammate: add logic to extract info from URLs and feed to agent as context. */
+  app.put('/api/user/links', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const links = req.body?.links;
+    if (!Array.isArray(links)) return res.status(400).json({ error: 'links array required' });
+    const sanitized = links.filter((u) => typeof u === 'string' && u.trim()).slice(0, 20);
+    const now = new Date().toISOString();
+    const json = JSON.stringify(sanitized);
+    db.prepare(
+      'INSERT INTO user_links (user_id, links, updated_at) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET links = ?, updated_at = ?'
+    ).run(auth.userId, json, now, json, now);
+    res.json({ ok: true, links: sanitized });
   });
 }
 

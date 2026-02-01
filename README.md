@@ -62,7 +62,48 @@ After deploy, set the frontend `VITE_API_URL` to your backend URL (e.g. `https:/
 | `/api/user/chat` | POST | Save user's chat history. Body `{ messages: Message[] }` (Clerk auth required). |
 | `/api/user/chat` | DELETE | Clear user's chat history (Clerk auth required). |
 | `/api/chat` | POST | Chat: with Clerk auth uses key from DB; otherwise body `{ message, apiKey? }`. Response `{ reply }`. |
-| `/api/resume/upload` | POST | Resume upload: multipart file, response `{ ok, savedPath, originalName }` |
+| `/api/resume/upload` | POST | Resume upload: multipart file, response `{ ok, savedPath, originalName }` (see **Resume flow** below). |
+| `/api/resume` | GET | Get current user's resume info. Response `{ fileName, originalName, uploadedAt }` (Clerk required). |
+| `/api/resume` | DELETE | Delete current user's resume (Clerk required). |
+| `/api/user/links` | GET | Get current user's links. Response `{ links: string[] }` (Clerk required). |
+| `/api/user/links` | PUT | Save current user's links. Body `{ links: string[] }` (Clerk required). Stored only; see **Links (placeholder)** below. |
+
+---
+
+## Resume: frontend → backend, storage, and agent
+
+- **How the frontend sends the resume**  
+  The frontend (e.g. `ResumeUpload`) sends the resume as a **multipart form** to `POST /api/resume/upload`:
+  - Field name: `file` (single PDF file).
+  - When Clerk is enabled, the request includes `Authorization: Bearer <Clerk JWT>` so the backend can associate the upload with the signed-in user.
+
+- **Where the backend stores it**  
+  - **Files:** On disk under `Backend/uploads/`. For signed-in users, files are under `uploads/<userId>/` (one folder per user). Filename is `timestamp-originalName.pdf`.
+  - **Database:** Table `user_resume` in `data/keys.db` (SQLite). Columns: `user_id`, `file_path`, `original_name`, `uploaded_at`, `extracted_profile` (JSON), `resume_text` (raw text from PDF). One row per user; a new upload replaces the previous one.
+
+- **How the backend agent uses it**  
+  When the user chats via `POST /api/chat`, the backend loads that user’s `extracted_profile` and `resume_text` from `user_resume`, builds a context string with `buildUserProfileContext()`, and injects it into the **Gemini system prompt**. The agent is instructed to answer questions about the user (name, title, experience, skills, etc.) from this resume content only.
+
+- **Known limitation**  
+  There is a **pending fix**: resume info is not always retrieved correctly (extraction/parsing). See TODOs in `resume-extract.js` and the resume upload handler in `index.js`.
+
+---
+
+## Links: frontend → backend and placeholder for extraction
+
+- **How the frontend sends links**  
+  The frontend sends the user’s links (e.g. LinkedIn, portfolio, GitHub) to the backend so the agent can use them as extra context:
+  - **GET /api/user/links** – Returns `{ links: string[] }` for the current user (Clerk required). The Dashboard loads these on mount and merges with local state.
+  - **PUT /api/user/links** – Body `{ links: string[] }` (array of URL strings). The Dashboard (and any profile links UI) should call this when the user adds/edits/removes links (e.g. on blur or save). Clerk auth required.
+
+- **Where the backend stores links**  
+  Table `user_links` in `data/keys.db`: `user_id`, `links` (JSON array of strings), `updated_at`. One row per user; PUT overwrites the list (max 20 URLs, non-empty strings only).
+
+- **Backend placeholder (for teammate)**  
+  The backend **does not** yet use links for the agent. It only stores and returns them. A teammate should:
+  1. In the chat flow (where `userProfileContext` is built), load the user’s links from `user_links`.
+  2. Implement a way to **extract information** from each URL (e.g. fetch and parse LinkedIn profile, portfolio page, or other public pages within ToS and rate limits).
+  3. Append that extracted data to the context passed to the agent (e.g. into the system prompt or a dedicated “user links context” block) so the agent can use it as a data resource when answering the user.
 
 ---
 

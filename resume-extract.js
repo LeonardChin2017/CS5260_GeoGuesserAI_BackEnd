@@ -4,6 +4,9 @@
  *    @mcp-apps/pdf-tools-mcp-server extractText). Step 1 can be swapped for an MCP client
  *    that spawns/calls a PDF MCP server when you run one.
  * 2. Agent (Gemini) analyzes the text and returns structured ExtractedProfile.
+ *
+ * TODO: Pending fix – info from resume is not always retrieved correctly (extraction/parsing).
+ * Improve PDF text extraction and/or Gemini parsing so the agent gets reliable profile data.
  */
 
 const path = require('path');
