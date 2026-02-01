@@ -91,9 +91,21 @@ db.exec(`
     user_id TEXT PRIMARY KEY,
     file_path TEXT NOT NULL,
     original_name TEXT NOT NULL,
-    uploaded_at TEXT NOT NULL
+    uploaded_at TEXT NOT NULL,
+    extracted_profile TEXT,
+    resume_text TEXT
   )
 `);
+try {
+  db.exec('ALTER TABLE user_resume ADD COLUMN extracted_profile TEXT');
+} catch (e) {
+  if (!/duplicate column/i.test(e.message)) throw e;
+}
+try {
+  db.exec('ALTER TABLE user_resume ADD COLUMN resume_text TEXT');
+} catch (e) {
+  if (!/duplicate column/i.test(e.message)) throw e;
+}
 if (hasClerk) console.log('[BACKEND] Clerk + DB: user Gemini keys, chat, and resume stored in', DB_PATH);
 
 // Directory for uploaded resumes (create if missing)
@@ -350,13 +362,49 @@ function buildGeminiContents(messages, currentMessage, toolResultText) {
   return parts;
 }
 
+/** Max resume text length to inject (leave room for system prompt + conversation). */
+const MAX_RESUME_CONTEXT_CHARS = 14000;
+
+/** Build text to inject into system prompt: full resume content so the agent can answer any question from the resume. */
+function buildUserProfileContext(extractedProfileJson, resumeText) {
+  const intro = '\n\nThe user has uploaded a resume. Use the resume content below to answer any question about the user (name, title, experience, location, nationality, PR status, skills, projects, education, etc.). Answer only from what is stated in the resume. If something is not in the resume, say you do not have that information from the resume.\n\n--- Resume content ---\n';
+  if (resumeText && typeof resumeText === 'string' && resumeText.trim()) {
+    const text = resumeText.trim().length > MAX_RESUME_CONTEXT_CHARS
+      ? resumeText.trim().slice(0, MAX_RESUME_CONTEXT_CHARS) + '\n[... truncated]'
+      : resumeText.trim();
+    return intro + text + '\n--- End resume ---';
+  }
+  if (extractedProfileJson && typeof extractedProfileJson === 'string') {
+    try {
+      const p = JSON.parse(extractedProfileJson);
+      const profile = p?.profile || p;
+      if (profile && typeof profile === 'object') {
+        const parts = [];
+        if (profile.name) parts.push('Name: ' + profile.name);
+        if (profile.title) parts.push('Title: ' + profile.title);
+        if (profile.experience) parts.push('Experience: ' + profile.experience);
+        if (profile.location) parts.push('Location: ' + profile.location);
+        if (profile.nationalityOrResidency) parts.push('Nationality/Residency: ' + profile.nationalityOrResidency);
+        if (profile.email) parts.push('Email: ' + profile.email);
+        if (profile.phone) parts.push('Phone: ' + profile.phone);
+        if (Array.isArray(profile.skills) && profile.skills.length) parts.push('Skills: ' + profile.skills.join(', '));
+        if (parts.length > 0) return intro + parts.join('\n') + '\n--- End resume ---';
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return '';
+}
+
 /** Call Gemini API with system prompt and conversation history. */
-async function getGeminiReply(contents, apiKey) {
+async function getGeminiReply(contents, apiKey, userProfileContext = '') {
   if (!apiKey || !apiKey.trim()) return null;
   const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
+  const systemText = JOBAI_SYSTEM_PROMPT + (userProfileContext || '');
   const body = {
-    systemInstruction: { parts: [{ text: JOBAI_SYSTEM_PROMPT }] },
+    systemInstruction: { parts: [{ text: systemText }] },
     contents: contents.map((c) => ({ role: c.role, parts: c.parts })),
   };
   const res = await fetch(url, {
@@ -428,8 +476,15 @@ app.post('/api/chat', async (req, res) => {
   }
 
   const contents = buildGeminiContents(history, message.trim(), toolResultText);
+  let userProfileContext = '';
+  if (hasClerk && getAuth(req)?.userId) {
+    const resumeRow = db.prepare('SELECT extracted_profile, resume_text FROM user_resume WHERE user_id = ?').get(getAuth(req).userId);
+    if (resumeRow && (resumeRow.resume_text || resumeRow.extracted_profile)) {
+      userProfileContext = buildUserProfileContext(resumeRow.extracted_profile, resumeRow.resume_text);
+    }
+  }
   let reply = 'No response';
-  const geminiReply = await getGeminiReply(contents, apiKey);
+  const geminiReply = await getGeminiReply(contents, apiKey, userProfileContext);
   if (geminiReply) reply = stripMarkdown(geminiReply);
   else if (!apiKey) console.log('[CHAT] No API key (set in Settings when using Clerk, or send apiKey/env)');
   console.log('[CHAT] >>> Sending reply + %d agentUpdate(s) to frontend\n', agentUpdates.length);
@@ -489,11 +544,22 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
       if (result) {
         extracted = result.profile;
         greeting = result.greeting || null;
-        if (extracted) console.log('[RESUME] Agent extracted profile for', originalName);
+        const resumeText = result.resumeText || null;
+        if (extracted && hasClerk && getAuth(req)?.userId) {
+          console.log('[RESUME] Agent extracted profile for', originalName);
+          db.prepare('UPDATE user_resume SET extracted_profile = ?, resume_text = ? WHERE user_id = ?').run(
+            JSON.stringify(extracted),
+            resumeText ? resumeText.slice(0, 50000) : null,
+            getAuth(req).userId
+          );
+        }
         if (greeting) console.log('[RESUME] Agent greeting:', greeting.slice(0, 80) + '...');
       }
     } catch (err) {
       console.log('[RESUME] Extract/analyze error:', err?.message);
+    }
+    if (hasClerk && getAuth(req)?.userId && !extracted) {
+      db.prepare('UPDATE user_resume SET extracted_profile = NULL, resume_text = NULL WHERE user_id = ?').run(getAuth(req).userId);
     }
   } else {
     console.log('[RESUME] No Gemini API key – skip extraction (set in Settings or GEMINI_API_KEY)');

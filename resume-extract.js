@@ -38,6 +38,7 @@ Also add a "greeting" field: one short message (2-3 sentences) to greet the user
     "title": "current/latest job title",
     "experience": "e.g. 5+ years",
     "location": "city/country",
+    "nationalityOrResidency": "e.g. Singaporean, Singapore PR, Malaysian, or empty string if not stated",
     "skills": ["skill1", "skill2", ...]
   },
   "preferences": {
@@ -106,6 +107,7 @@ function normalizeExtractedProfile(obj) {
       title: typeof p.title === 'string' ? p.title : '',
       experience: typeof p.experience === 'string' ? p.experience : '',
       location: typeof p.location === 'string' ? p.location : '',
+      nationalityOrResidency: typeof p.nationalityOrResidency === 'string' ? p.nationalityOrResidency.trim() : '',
       skills: Array.isArray(p.skills) ? p.skills.filter((x) => typeof x === 'string') : [],
     },
     preferences: {
@@ -128,7 +130,7 @@ function normalizeExtractedProfile(obj) {
  * MCP-style pipeline: extract text (PDF tool) then agent analysis.
  * @param {string} absoluteFilePath - Full path to the saved resume file
  * @param {string} apiKey - Gemini API key
- * @returns {Promise<{ profile: object, greeting: string|null }|null>} Profile + greeting from master agent, or null
+ * @returns {Promise<{ profile: object, greeting: string|null, resumeText: string }|null>} Profile, greeting, and raw resume text for chat context
  */
 async function extractResumeProfile(absoluteFilePath, apiKey) {
   const text = await extractTextFromPdf(absoluteFilePath);
@@ -137,7 +139,9 @@ async function extractResumeProfile(absoluteFilePath, apiKey) {
     return null;
   }
   console.log('[RESUME] Extracted', text.length, 'chars from PDF');
-  return analyzeResumeWithGemini(text, apiKey);
+  const result = await analyzeResumeWithGemini(text, apiKey);
+  if (!result) return null;
+  return { ...result, resumeText: text };
 }
 
 module.exports = { extractTextFromPdf, analyzeResumeWithGemini, extractResumeProfile, normalizeExtractedProfile };
