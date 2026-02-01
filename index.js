@@ -278,6 +278,26 @@ function getToolToRun(userMessage) {
   return null;
 }
 
+/** Infer display params from user message for "What the agent is doing" panel (e.g. role, location). */
+function inferToolParams(userMessage, toolName) {
+  const lower = (userMessage || '').toLowerCase();
+  const params = {};
+  if (toolName === 'scan_job_offers') {
+    if (/\b(software\s*engineer|frontend|backend|full\s*stack|developer|engineer)\b/.test(lower)) {
+      const m = lower.match(/(software\s*engineer|frontend|backend|full\s*stack|developer|engineer)/);
+      params.role = (m ? m[1] : 'Software Engineer').replace(/\b\w/g, (c) => c.toUpperCase());
+    } else params.role = 'From your profile';
+    if (/\b(sg|singapore|remote|singapore\s*\/\s*hybrid)\b/.test(lower)) {
+      if (/sg\b|singapore/.test(lower)) params.location = 'Singapore';
+      else if (/remote/.test(lower)) params.location = 'Remote';
+      else params.location = 'Singapore / Hybrid';
+    } else params.location = 'From your profile';
+  }
+  if (toolName === 'get_application_status') params.summary = 'Application status';
+  if (toolName === 'suggest_profile_improvements') params.summary = 'Profile suggestions';
+  return params;
+}
+
 /** Run a tool by name and return agentUpdate for frontend. */
 function runTool(name) {
   switch (name) {
@@ -353,9 +373,11 @@ app.post('/api/chat', async (req, res) => {
   console.log('[CHAT] message from frontend: "%s"', message.trim().slice(0, 200));
 
   const agentUpdates = [];
+  let toolCall = null;
   let toolResultText = '';
   const toolName = getToolToRun(message);
   if (toolName) {
+    toolCall = { name: toolName, params: inferToolParams(message, toolName) };
     const update = runTool(toolName);
     if (update) {
       agentUpdates.push(update);
@@ -375,7 +397,11 @@ app.post('/api/chat', async (req, res) => {
   if (geminiReply) reply = geminiReply;
   else if (!apiKey) console.log('[CHAT] No API key (set in Settings when using Clerk, or send apiKey/env)');
   console.log('[CHAT] >>> Sending reply + %d agentUpdate(s) to frontend\n', agentUpdates.length);
-  return res.json({ reply, agentUpdates: agentUpdates.length ? agentUpdates : undefined });
+  return res.json({
+    reply,
+    agentUpdates: agentUpdates.length ? agentUpdates : undefined,
+    toolCall: toolCall || undefined,
+  });
 });
 
 /** Resume upload: frontend sends file, backend saves to local uploads/ and logs */
