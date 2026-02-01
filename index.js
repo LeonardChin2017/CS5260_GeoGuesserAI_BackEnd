@@ -106,6 +106,11 @@ try {
 } catch (e) {
   if (!/duplicate column/i.test(e.message)) throw e;
 }
+try {
+  db.exec('ALTER TABLE user_resume ADD COLUMN activity_steps TEXT');
+} catch (e) {
+  if (!/duplicate column/i.test(e.message)) throw e;
+}
 db.exec(`
   CREATE TABLE IF NOT EXISTS user_links (
     user_id TEXT PRIMARY KEY,
@@ -504,6 +509,18 @@ app.post('/api/chat', async (req, res) => {
   });
 });
 
+/** Resume extraction activity steps (orchestrator → parser → profile → preferences → ready). Stored on backend; frontend fetches and displays. */
+function buildResumeActivityStepsDone(originalName) {
+  const name = originalName ? ` "${originalName}"` : '';
+  return [
+    { id: 'orchestrator', agent: 'Orchestrator', message: `Received resume${name}`, status: 'done' },
+    { id: 'parser', agent: 'Parser agent', message: 'Extracted text from document', status: 'done' },
+    { id: 'profile', agent: 'Profile agent', message: 'Extracted profile (name, contact, skills)', status: 'done' },
+    { id: 'preferences', agent: 'Preferences agent', message: 'Inferred job preferences', status: 'done' },
+    { id: 'done', agent: '—', message: 'Ready for follow-up questions in chat', status: 'done' },
+  ];
+}
+
 /** Resume upload: saves file, then MCP-style extract (PDF text + Gemini) and returns extracted profile when possible.
  *  TODO: Pending fix – resume info cannot be retrieved correctly in all cases; backend agent may not get full profile.
  */
@@ -558,9 +575,11 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
         const resumeText = result.resumeText || null;
         if (extracted && hasClerk && getAuth(req)?.userId) {
           console.log('[RESUME] Agent extracted profile for', originalName);
-          db.prepare('UPDATE user_resume SET extracted_profile = ?, resume_text = ? WHERE user_id = ?').run(
+          const activitySteps = buildResumeActivityStepsDone(originalName);
+          db.prepare('UPDATE user_resume SET extracted_profile = ?, resume_text = ?, activity_steps = ? WHERE user_id = ?').run(
             JSON.stringify(extracted),
             resumeText ? resumeText.slice(0, 50000) : null,
+            JSON.stringify(activitySteps),
             getAuth(req).userId
           );
         }
@@ -570,23 +589,48 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
       console.log('[RESUME] Extract/analyze error:', err?.message);
     }
     if (hasClerk && getAuth(req)?.userId && !extracted) {
-      db.prepare('UPDATE user_resume SET extracted_profile = NULL, resume_text = NULL WHERE user_id = ?').run(getAuth(req).userId);
+      db.prepare('UPDATE user_resume SET extracted_profile = NULL, resume_text = NULL, activity_steps = NULL WHERE user_id = ?').run(getAuth(req).userId);
     }
   } else {
     console.log('[RESUME] No Gemini API key – skip extraction (set in Settings or GEMINI_API_KEY)');
   }
 
-  res.json({ ok: true, savedPath: fileName, originalName, uploadedAt: now, extracted: extracted || undefined, greeting: greeting || undefined });
+  const activityStepsForResponse = hasClerk && getAuth(req)?.userId && extracted
+    ? buildResumeActivityStepsDone(originalName)
+    : undefined;
+  res.json({
+    ok: true,
+    savedPath: fileName,
+    originalName,
+    uploadedAt: now,
+    extracted: extracted || undefined,
+    greeting: greeting || undefined,
+    activitySteps: activityStepsForResponse,
+  });
 });
 
-/** Get current user's resume info (Clerk required). Returns { fileName, originalName, uploadedAt } or 404. */
+/** Get current user's resume info (Clerk required). Returns { fileName, originalName, uploadedAt, activitySteps? } or 404. */
 if (hasClerk) {
   app.get('/api/resume', (req, res) => {
     const auth = getAuth(req);
     if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
-    const row = db.prepare('SELECT file_path, original_name, uploaded_at FROM user_resume WHERE user_id = ?').get(auth.userId);
+    const row = db.prepare('SELECT file_path, original_name, uploaded_at, activity_steps FROM user_resume WHERE user_id = ?').get(auth.userId);
     if (!row) return res.status(404).json({ error: 'No resume' });
-    res.json({ fileName: row.file_path, originalName: row.original_name, uploadedAt: row.uploaded_at });
+    let activitySteps = null;
+    if (row.activity_steps && typeof row.activity_steps === 'string') {
+      try {
+        activitySteps = JSON.parse(row.activity_steps);
+        if (!Array.isArray(activitySteps)) activitySteps = null;
+      } catch {
+        activitySteps = null;
+      }
+    }
+    res.json({
+      fileName: row.file_path,
+      originalName: row.original_name,
+      uploadedAt: row.uploaded_at,
+      activitySteps: activitySteps || undefined,
+    });
   });
 
   /** Delete current user's resume from backend (file + DB). */
