@@ -163,14 +163,37 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
 
-/** Record backend activity for the frontend "what the backend is doing" log. source: 'resume' | 'chat', type: e.g. 'agent_step' | 'tool_call' | 'done'. */
+/** Agent: decide what to share to frontend and summarize into one short line. Backend owns format; frontend just displays. */
+function summarizeActivityForFrontend(source, type, message, payload) {
+  const raw = (message || '').trim();
+  if (source === 'resume') {
+    if (raw.includes('Received resume upload')) return raw.includes(':') ? `Resume received: ${raw.split(':').slice(1).join(':').trim()}` : 'Resume received.';
+    if (raw.includes('File saved') && raw.includes('Starting extraction')) return 'File saved, starting extraction.';
+    if (raw.includes('Reading PDF') || raw.includes('extract-text')) return 'Reading PDF.';
+    if (raw.includes('Extracted text')) return raw.includes('chars') ? 'Text extracted from PDF.' : 'Text extracted.';
+    if (raw.includes('Analyzing') && raw.includes('AI')) return 'Analyzing resume with AI.';
+    if (raw.includes('Extraction complete') || raw.includes('Ready for follow-up')) return 'Profile extracted, ready for chat.';
+    if (raw.includes('No API key')) return 'File saved. Set API key in Settings to extract profile.';
+    if (raw.includes('Extraction error')) return raw.length > 80 ? 'Extraction failed.' : raw;
+  }
+  if (source === 'chat') {
+    if (raw.includes('Chat request received')) return 'Chat request received.';
+    if (raw.includes('Running tool:')) return raw.replace('Running tool:', 'Tool:').trim();
+    if (raw.includes('Reply sent')) return 'Reply sent.';
+  }
+  const oneLine = raw.split(/[.!?\n]/)[0].trim();
+  return oneLine.length > 72 ? oneLine.slice(0, 69) + '…' : oneLine || 'Activity.';
+}
+
+/** Record backend activity for the frontend. Agent summarizes to one line before storing. */
 function recordBackendActivity(req, { source, type, message, payload }) {
   const userId = hasClerk && typeof getAuth === 'function' && getAuth(req)?.userId ? getAuth(req).userId : null;
+  const oneLine = summarizeActivityForFrontend(source, type, message, payload);
   const now = new Date().toISOString();
   const payloadJson = payload != null ? JSON.stringify(payload) : null;
   db.prepare(
     'INSERT INTO backend_activity (user_id, source, type, message, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(userId, source, type || 'agent_step', message || '', payloadJson, now);
+  ).run(userId, source, type || 'agent_step', oneLine, payloadJson, now);
   // Keep last 100 per user (and last 100 for anonymous) to avoid unbounded growth
   const keep = 100;
   if (userId) {
@@ -629,20 +652,28 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
   }
   const activityEvents = [];
   const pushResumeActivity = (ev) => {
-    pushActivityEvent(activityEvents, ev);
+    const oneLine = summarizeActivityForFrontend('resume', ev.type, ev.message, ev.agent != null || ev.status != null ? { agent: ev.agent, status: ev.status } : undefined);
+    pushActivityEvent(activityEvents, { ...ev, message: oneLine });
     recordBackendActivity(req, {
       source: 'resume',
       type: ev.type || 'agent_step',
-      message: ev.message,
+      message: oneLine,
       payload: ev.agent != null || ev.status != null ? { agent: ev.agent, status: ev.status } : undefined,
     });
   };
+
+  pushResumeActivity({
+    type: 'agent_step',
+    message: originalName ? `Received resume upload: ${originalName}` : 'Received resume upload',
+    status: 'done',
+  });
+  pushResumeActivity({
+    type: 'agent_step',
+    message: 'File saved. Starting extraction.',
+    status: 'running',
+  });
+
   if (apiKey) {
-    pushResumeActivity({
-      type: 'agent_step',
-      message: originalName ? `Received resume upload: ${originalName}` : 'Received resume upload',
-      status: 'done',
-    });
     try {
       const result = await extractResumeProfile(absolutePath, apiKey, (ev) => pushResumeActivity(ev));
       if (result) {
@@ -667,12 +698,18 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
       }
     } catch (err) {
       console.log('[RESUME] Extract/analyze error:', err?.message);
+      pushResumeActivity({ type: 'agent_step', message: `Extraction error: ${err?.message || 'Unknown'}`, status: 'done' });
     }
     if (hasClerk && getAuth(req)?.userId && !extracted) {
       db.prepare('UPDATE user_resume SET extracted_profile = NULL, resume_text = NULL, activity_steps = NULL WHERE user_id = ?').run(getAuth(req).userId);
     }
   } else {
     console.log('[RESUME] No Gemini API key – skip extraction (set in Settings or GEMINI_API_KEY)');
+    pushResumeActivity({
+      type: 'done',
+      message: 'No API key set. Set Gemini API key in Settings to extract profile from resume.',
+      status: 'done',
+    });
   }
 
   const activityStepsForResponse = activityEvents.length > 0 ? activityEvents : undefined;
