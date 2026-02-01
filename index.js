@@ -139,8 +139,16 @@ app.get('/api/hello', (req, res) => {
   res.json({ message: 'Hello from jobAI backend', env: process.env.NODE_ENV || 'development' });
 });
 
-/** Save user's Gemini API key (Clerk auth required). Key is encrypted at rest in DB. */
+/** Check if user has a Gemini key saved (Clerk auth required). Returns { hasKey: true|false }; never returns the key. */
 if (hasClerk) {
+  app.get('/api/user/gemini-key', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const row = db.prepare('SELECT 1 FROM user_gemini_keys WHERE user_id = ?').get(auth.userId);
+    res.json({ hasKey: !!row });
+  });
+
+  /** Save user's Gemini API key (Clerk auth required). Key is encrypted at rest in DB. */
   app.put('/api/user/gemini-key', (req, res) => {
     const auth = getAuth(req);
     if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
