@@ -120,6 +120,15 @@ app.use((req, res, next) => {
   next();
 });
 
+/** Root – API info (no web UI) */
+app.get('/', (req, res) => {
+  res.json({
+    service: 'jobai-backend',
+    message: 'API only. Try GET /health or POST /api/chat.',
+    health: req.originalUrl.replace(/\/?$/, '') + '/health',
+  });
+});
+
 /** Health check – for frontend and load balancers */
 app.get('/health', (req, res) => {
   res.json({ ok: true, service: 'jobai-backend', timestamp: new Date().toISOString() });
