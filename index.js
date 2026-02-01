@@ -224,15 +224,26 @@ if (hasClerk) {
   });
 }
 
-/** JobAI agent system prompt: persona + tools the agent can use (results are injected by the backend). */
-const JOBAI_SYSTEM_PROMPT = `You are jobAI, a friendly assistant that helps users land their next job offer. You have access to tools that run on the backend; when the user asks to find jobs, scan job offers, check application status, or get profile suggestions, the backend will run those tools and you will receive the results to summarize.
+/** JobAI agent system prompt: persona + tools (results injected by backend). No markdown—frontend shows plain text only. */
+const JOBAI_SYSTEM_PROMPT = `You are jobAI, a friendly assistant that helps users land their next job offer.
 
-Your tools (backend executes them; you describe and interpret results):
-- scan_job_offers: Search for job listings that match the user's profile (role, skills, location). You will receive a list of jobs to present.
-- get_application_status: Summarize the user's application status (saved applications, follow-ups).
-- suggest_profile_improvements: Suggest improvements to resume or profile based on their goals.
+IMPORTANT: Use plain text only. Do not use markdown: no asterisks for bold (**text**), no bullet asterisks (*), no hashtags for headers. Write in clear, readable sentences. The chat UI cannot render markdown.
 
-Be concise, encouraging, and actionable. When you receive tool results in the conversation, present them clearly (e.g. list key jobs with title and company). Never make up job titles or companies—only use data from the tool results. If no tool was run yet, invite the user to try "Find jobs that match my profile" or ask about their application status.`;
+Your tools (the backend runs them; you summarize the results for the user):
+- scan_job_offers: Search for job listings. You will receive a list of jobs to present.
+- get_application_status: Summarize the user's applications and follow-ups.
+- suggest_profile_improvements: Suggest resume or profile improvements.
+
+When the user wants to find jobs but has not given details yet, ask in plain text, for example:
+
+"To find the best jobs for you, please tell me:
+1) What kind of role you want (e.g. Software Engineer, Marketing Manager, Data Analyst)
+2) Your key skills
+3) Your preferred location (e.g. Singapore, Remote, London)
+
+You can also upload your resume on the right and I can extract this for you. Once I have these details, I can find jobs that match your profile."
+
+Keep answers concise and encouraging. When you receive tool results, present them clearly in plain text (list jobs with title and company). Never invent job titles or companies—only use data from the tool results. If no tool was run yet, invite the user to try "Find jobs that match my profile" or ask about their application status.`;
 
 /** Mock: "scan" job offers (no real JobStreet; returns plausible fake listings for demo). */
 function runScanJobOffers() {
@@ -349,6 +360,17 @@ async function getGeminiReply(contents, apiKey) {
   return typeof text === 'string' ? text.trim() : null;
 }
 
+/** Strip common markdown so the frontend (plain text) does not show ** or *. */
+function stripMarkdown(text) {
+  if (typeof text !== 'string') return text;
+  return text
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/^#+\s*/gm, '')
+    .replace(/^\s*[-*]\s+/gm, '• ')
+    .trim();
+}
+
 /** Chat: JobAI agent with system prompt; optional history; runs mock tools and returns reply + agentUpdates. */
 app.post('/api/chat', async (req, res) => {
   console.log('\n[CHAT] <<< Received from frontend');
@@ -394,7 +416,7 @@ app.post('/api/chat', async (req, res) => {
   const contents = buildGeminiContents(history, message.trim(), toolResultText);
   let reply = 'No response';
   const geminiReply = await getGeminiReply(contents, apiKey);
-  if (geminiReply) reply = geminiReply;
+  if (geminiReply) reply = stripMarkdown(geminiReply);
   else if (!apiKey) console.log('[CHAT] No API key (set in Settings when using Clerk, or send apiKey/env)');
   console.log('[CHAT] >>> Sending reply + %d agentUpdate(s) to frontend\n', agentUpdates.length);
   return res.json({
