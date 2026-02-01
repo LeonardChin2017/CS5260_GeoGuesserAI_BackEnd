@@ -118,7 +118,19 @@ db.exec(`
     updated_at TEXT NOT NULL
   )
 `);
-if (hasClerk) console.log('[BACKEND] Clerk + DB: user Gemini keys, chat, resume, and links stored in', DB_PATH);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS backend_activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    source TEXT NOT NULL,
+    type TEXT NOT NULL,
+    message TEXT NOT NULL,
+    payload TEXT,
+    created_at TEXT NOT NULL
+  )
+`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_backend_activity_user_created ON backend_activity(user_id, created_at DESC)');
+if (hasClerk) console.log('[BACKEND] Clerk + DB: user Gemini keys, chat, resume, links, and backend activity stored in', DB_PATH);
 
 // Directory for uploaded resumes (create if missing)
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
@@ -151,6 +163,31 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
 
+/** Record backend activity for the frontend "what the backend is doing" log. source: 'resume' | 'chat', type: e.g. 'agent_step' | 'tool_call' | 'done'. */
+function recordBackendActivity(req, { source, type, message, payload }) {
+  const userId = hasClerk && typeof getAuth === 'function' && getAuth(req)?.userId ? getAuth(req).userId : null;
+  const now = new Date().toISOString();
+  const payloadJson = payload != null ? JSON.stringify(payload) : null;
+  db.prepare(
+    'INSERT INTO backend_activity (user_id, source, type, message, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(userId, source, type || 'agent_step', message || '', payloadJson, now);
+  // Keep last 100 per user (and last 100 for anonymous) to avoid unbounded growth
+  const keep = 100;
+  if (userId) {
+    const ids = db.prepare('SELECT id FROM backend_activity WHERE user_id = ? ORDER BY created_at DESC').all(userId);
+    if (ids.length > keep) {
+      const toDelete = ids.slice(keep).map((r) => r.id);
+      if (toDelete.length > 0) db.prepare(`DELETE FROM backend_activity WHERE id IN (${toDelete.join(',')})`).run();
+    }
+  } else {
+    const ids = db.prepare('SELECT id FROM backend_activity WHERE user_id IS NULL ORDER BY created_at DESC').all();
+    if (ids.length > keep) {
+      const toDelete = ids.slice(keep).map((r) => r.id);
+      if (toDelete.length > 0) db.prepare(`DELETE FROM backend_activity WHERE id IN (${toDelete.join(',')})`).run();
+    }
+  }
+}
+
 app.use(cors({ origin: true }));
 app.use(express.json());
 
@@ -182,6 +219,27 @@ app.get('/health', (req, res) => {
 /** Simple hello – for testing connectivity from the frontend */
 app.get('/api/hello', (req, res) => {
   res.json({ message: 'Hello from jobAI backend', env: process.env.NODE_ENV || 'development' });
+});
+
+/** Get recent backend activity (what the backend/agents did). For frontend "agent activity" panel. With Clerk: returns activities for current user (empty if not authenticated). Without Clerk: returns anonymous activities. */
+app.get('/api/backend-activity', (req, res) => {
+  const userId = hasClerk && typeof getAuth === 'function' && getAuth(req)?.userId ? getAuth(req).userId : null;
+  if (hasClerk && !userId) {
+    return res.json({ activities: [] });
+  }
+  const limit = Math.min(parseInt(req.query?.limit, 10) || 50, 100);
+  const rows = userId
+    ? db.prepare('SELECT id, source, type, message, payload, created_at FROM backend_activity WHERE user_id = ? ORDER BY created_at DESC LIMIT ?').all(userId, limit)
+    : db.prepare('SELECT id, source, type, message, payload, created_at FROM backend_activity WHERE user_id IS NULL ORDER BY created_at DESC LIMIT ?').all(limit);
+  const activities = rows.map((r) => ({
+    id: r.id,
+    source: r.source,
+    type: r.type,
+    message: r.message,
+    payload: r.payload ? (() => { try { return JSON.parse(r.payload); } catch { return null; } })() : null,
+    timestamp: r.created_at,
+  }));
+  res.json({ activities });
 });
 
 /** Check if user has a Gemini key saved (Clerk auth required). Returns { hasKey: true|false }; never returns the key. */
@@ -448,6 +506,7 @@ function stripMarkdown(text) {
 /** Chat: JobAI agent with system prompt; optional history; runs mock tools and returns reply + agentUpdates. */
 app.post('/api/chat', async (req, res) => {
   console.log('\n[CHAT] <<< Received from frontend');
+  recordBackendActivity(req, { source: 'chat', type: 'agent_step', message: 'Chat request received from frontend' });
   const message = req.body?.message;
   if (typeof message !== 'string' || !message.trim()) {
     return res.status(400).json({ error: 'message required' });
@@ -474,6 +533,7 @@ app.post('/api/chat', async (req, res) => {
   const toolName = getToolToRun(message);
   if (toolName) {
     toolCall = { name: toolName, params: inferToolParams(message, toolName) };
+    recordBackendActivity(req, { source: 'chat', type: 'tool_call', message: `Running tool: ${toolName}` });
     const update = runTool(toolName);
     if (update) {
       agentUpdates.push(update);
@@ -501,6 +561,7 @@ app.post('/api/chat', async (req, res) => {
   const geminiReply = await getGeminiReply(contents, apiKey, userProfileContext);
   if (geminiReply) reply = stripMarkdown(geminiReply);
   else if (!apiKey) console.log('[CHAT] No API key (set in Settings when using Clerk, or send apiKey/env)');
+  recordBackendActivity(req, { source: 'chat', type: 'done', message: 'Reply sent to frontend' });
   console.log('[CHAT] >>> Sending reply + %d agentUpdate(s) to frontend\n', agentUpdates.length);
   return res.json({
     reply,
@@ -567,19 +628,28 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
     if (row?.encrypted_key) apiKey = decryptFromDb(row.encrypted_key) || apiKey;
   }
   const activityEvents = [];
+  const pushResumeActivity = (ev) => {
+    pushActivityEvent(activityEvents, ev);
+    recordBackendActivity(req, {
+      source: 'resume',
+      type: ev.type || 'agent_step',
+      message: ev.message,
+      payload: ev.agent != null || ev.status != null ? { agent: ev.agent, status: ev.status } : undefined,
+    });
+  };
   if (apiKey) {
-    pushActivityEvent(activityEvents, {
+    pushResumeActivity({
       type: 'agent_step',
       message: originalName ? `Received resume upload: ${originalName}` : 'Received resume upload',
       status: 'done',
     });
     try {
-      const result = await extractResumeProfile(absolutePath, apiKey, (ev) => pushActivityEvent(activityEvents, ev));
+      const result = await extractResumeProfile(absolutePath, apiKey, (ev) => pushResumeActivity(ev));
       if (result) {
         extracted = result.profile;
         greeting = result.greeting || null;
         const resumeText = result.resumeText || null;
-        pushActivityEvent(activityEvents, {
+        pushResumeActivity({
           type: 'done',
           message: 'Extraction complete. Ready for follow-up in chat.',
           status: 'done',
@@ -617,27 +687,59 @@ app.post('/api/resume/upload', upload.single('file'), async (req, res) => {
   });
 });
 
-/** Get current user's resume info (Clerk required). Returns { fileName, originalName, uploadedAt, activitySteps? } or 404. */
+/** Format backend_activity row into the same shape as activity steps (frontend displays whatever backend sends). */
+function formatBackendActivityAsStep(row) {
+  let payload = null;
+  if (row.payload && typeof row.payload === 'string') {
+    try {
+      payload = JSON.parse(row.payload);
+    } catch {
+      payload = null;
+    }
+  } else if (row.payload && typeof row.payload === 'object') payload = row.payload;
+  const agent = payload?.agent || (row.source === 'resume' ? 'Resume' : 'Chat');
+  const status = payload?.status || 'done';
+  return {
+    id: String(row.id),
+    type: row.type || 'agent_step',
+    message: row.message,
+    status,
+    agent,
+    timestamp: row.created_at,
+  };
+}
+
+/** Get current user's resume info (Clerk required). Returns { fileName, originalName, uploadedAt, activitySteps? } or 404. activitySteps = resume steps + backend activity, formatted by backend. */
 if (hasClerk) {
   app.get('/api/resume', (req, res) => {
     const auth = getAuth(req);
     if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
     const row = db.prepare('SELECT file_path, original_name, uploaded_at, activity_steps FROM user_resume WHERE user_id = ?').get(auth.userId);
     if (!row) return res.status(404).json({ error: 'No resume' });
-    let activitySteps = null;
+    let resumeSteps = [];
     if (row.activity_steps && typeof row.activity_steps === 'string') {
       try {
-        activitySteps = JSON.parse(row.activity_steps);
-        if (!Array.isArray(activitySteps)) activitySteps = null;
+        const parsed = JSON.parse(row.activity_steps);
+        if (Array.isArray(parsed)) resumeSteps = parsed;
       } catch {
-        activitySteps = null;
+        // ignore
       }
     }
+    const limit = 50;
+    const backendRows = db
+      .prepare('SELECT id, source, type, message, payload, created_at FROM backend_activity WHERE user_id = ? ORDER BY created_at DESC LIMIT ?')
+      .all(auth.userId, limit);
+    const backendSteps = backendRows.map(formatBackendActivityAsStep);
+    const combined = [...backendSteps, ...resumeSteps].sort((a, b) => {
+      const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+      const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+      return tb - ta;
+    });
     res.json({
       fileName: row.file_path,
       originalName: row.original_name,
       uploadedAt: row.uploaded_at,
-      activitySteps: activitySteps || undefined,
+      activitySteps: combined.length > 0 ? combined : undefined,
     });
   });
 
