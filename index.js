@@ -239,20 +239,30 @@ app.get('/health', (req, res) => {
   res.json({ ok: true, service: 'jobai-backend', timestamp: new Date().toISOString() });
 });
 
-/** Simple hello – for testing connectivity from the frontend */
+/** Simple hello – for testing connectivity. Add ?debug=activity to get recent backend_activity (works even if /api/debug/activity is not deployed). */
 app.get('/api/hello', (req, res) => {
+  if (req.query?.debug === 'activity') {
+    const limit = Math.min(parseInt(req.query?.limit, 10) || 10, 50);
+    const rows = db.prepare('SELECT id, user_id, source, type, message, created_at FROM backend_activity ORDER BY id DESC LIMIT ?').all(limit);
+    return res.json({
+      debug: true,
+      backend_activity_count: rows.length,
+      backend_activity_recent: rows.map((r) => ({ id: r.id, source: r.source, type: r.type, message: r.message, created_at: r.created_at })),
+      note: 'Activity steps are in POST /api/resume/upload (activitySteps) and GET /api/resume (activitySteps).',
+    });
+  }
   res.json({ message: 'Hello from jobAI backend', env: process.env.NODE_ENV || 'development' });
 });
 
-/** Debug: check if backend has activity data. GET /api/debug/activity to see recent backend_activity rows. No auth required. (formatBackendActivityAsStep is defined later in file.) */
+/** Debug: GET /api/debug/activity (same as /api/hello?debug=activity). */
 app.get('/api/debug/activity', (req, res) => {
   const limit = Math.min(parseInt(req.query?.limit, 10) || 10, 50);
-  const rows = db.prepare('SELECT id, user_id, source, type, message, payload, created_at FROM backend_activity ORDER BY id DESC LIMIT ?').all(limit);
+  const rows = db.prepare('SELECT id, user_id, source, type, message, created_at FROM backend_activity ORDER BY id DESC LIMIT ?').all(limit);
   res.json({
     debug: true,
     backend_activity_count: rows.length,
     backend_activity_recent: rows.map((r) => ({ id: r.id, source: r.source, type: r.type, message: r.message, created_at: r.created_at })),
-    note: 'Activity steps are in POST /api/resume/upload response (activitySteps) and GET /api/resume (activitySteps). Backend logs: [RESUME] >>> Sending response: activitySteps count.',
+    note: 'Activity steps are in POST /api/resume/upload (activitySteps) and GET /api/resume (activitySteps).',
   });
 });
 
