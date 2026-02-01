@@ -24,12 +24,13 @@ Copy `.env.example` to `.env` and set:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GEMINI_API_KEY` | Yes (for chat) | [Google AI Studio](https://aistudio.google.com/apikey) API key |
-| `GEMINI_KEY_ENCODING_SECRET` | Yes (for GET /api/gemini-key) | Min 16 chars. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` |
+| `CLERK_SECRET_KEY` | Yes (for per-user key storage) | Clerk Secret Key from [dashboard](https://dashboard.clerk.com) → API Keys |
+| `ENCRYPTION_SECRET` | Yes (when using Clerk) | Min 16 chars; encrypts Gemini keys at rest in DB. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` |
+| `GEMINI_API_KEY` | No | Only for fallback when Clerk is not configured (key in request body or env) |
 | `PORT` | No | Default 3001 |
 | `GEMINI_MODEL` | No | Default gemini-2.5-flash |
 
-Never commit `.env`; it is in `.gitignore`.
+Never commit `.env`; it is in `.gitignore`. User Gemini keys are stored in SQLite under `data/` (encrypted).
 
 ---
 
@@ -51,8 +52,8 @@ After deploy, set the frontend `VITE_API_URL` to your backend URL (e.g. `https:/
 |----------|--------|-------------|
 | `/health` | GET | Health check |
 | `/api/hello` | GET | Test message |
-| `/api/gemini-key` | GET | Returns encrypted Gemini key for frontend (when backend has key + encoding secret) |
-| `/api/chat` | POST | Chat: body `{ message, apiKey? }` or `{ message, encodedKey? }`, response `{ reply }` |
+| `/api/user/gemini-key` | PUT | Save user's Gemini API key (Clerk auth required). Body `{ apiKey }`. Key stored encrypted in DB. |
+| `/api/chat` | POST | Chat: with Clerk auth uses key from DB; otherwise body `{ message, apiKey? }`. Response `{ reply }`. |
 | `/api/resume/upload` | POST | Resume upload: multipart file, response `{ ok, savedPath, originalName }` |
 
 ---

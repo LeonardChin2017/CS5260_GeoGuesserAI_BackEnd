@@ -6,22 +6,28 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const crypto = require('crypto');
+const Database = require('better-sqlite3');
 
 const ALGO = 'aes-256-gcm';
 const IV_LEN = 16;
 const AUTH_TAG_LEN = 16;
-const KEY_LEN = 32;
 
-/** Derive a 32-byte key from ENCODING_SECRET for AES-256. */
-function getEncodingKey() {
-  const secret = process.env.GEMINI_KEY_ENCODING_SECRET || process.env.ENCODING_SECRET || '';
+const hasClerk = !!(process.env.CLERK_SECRET_KEY || '').trim();
+const hasEncryptionSecret = () => {
+  const s = process.env.ENCRYPTION_SECRET || process.env.GEMINI_KEY_ENCODING_SECRET || '';
+  return s && s.length >= 16;
+};
+
+/** Derive a 32-byte key for AES-256 (DB at-rest encryption). */
+function getEncryptionKey() {
+  const secret = process.env.ENCRYPTION_SECRET || process.env.GEMINI_KEY_ENCODING_SECRET || '';
   if (!secret || secret.length < 16) return null;
   return crypto.createHash('sha256').update(secret, 'utf8').digest();
 }
 
-/** Encrypt plaintext with server secret; returns base64(iv + authTag + ciphertext). */
-function encodeGeminiKey(plaintext) {
-  const key = getEncodingKey();
+/** Encrypt plaintext for DB storage; returns base64(iv + authTag + ciphertext). */
+function encryptForDb(plaintext) {
+  const key = getEncryptionKey();
   if (!key || typeof plaintext !== 'string' || !plaintext.trim()) return null;
   const iv = crypto.randomBytes(IV_LEN);
   const cipher = crypto.createCipheriv(ALGO, key, iv, { authTagLength: AUTH_TAG_LEN });
@@ -30,9 +36,9 @@ function encodeGeminiKey(plaintext) {
   return Buffer.concat([iv, authTag, enc]).toString('base64');
 }
 
-/** Decrypt base64 blob from frontend; returns plain API key or null. */
-function decodeGeminiKey(encoded) {
-  const key = getEncodingKey();
+/** Decrypt blob from DB; returns plain API key or null. */
+function decryptFromDb(encoded) {
+  const key = getEncryptionKey();
   if (!key || typeof encoded !== 'string' || !encoded.trim()) return null;
   let buf;
   try {
@@ -53,14 +59,41 @@ function decodeGeminiKey(encoded) {
   }
 }
 
+/** Legacy: decode encodedKey from frontend (backward compat when not using Clerk). */
+function decodeGeminiKey(encoded) {
+  return decryptFromDb(encoded);
+}
+
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+// SQLite DB for per-user Gemini keys (when using Clerk)
+const DATA_DIR = path.join(__dirname, 'data');
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+const DB_PATH = path.join(DATA_DIR, 'keys.db');
+const db = new Database(DB_PATH);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_gemini_keys (
+    user_id TEXT PRIMARY KEY,
+    encrypted_key TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+if (hasClerk) console.log('[BACKEND] Clerk + DB: user Gemini keys stored in', DB_PATH);
 
 // Directory for uploaded resumes (create if missing)
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) {
   fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   console.log('[BACKEND] Created uploads dir:', UPLOADS_DIR);
+}
+
+// Clerk (only when CLERK_SECRET_KEY is set). Use getAuth(req) for API; do not use requireAuth (redirects).
+let getAuth;
+if (hasClerk) {
+  const clerk = require('@clerk/express');
+  getAuth = clerk.getAuth;
+  app.use(clerk.clerkMiddleware());
 }
 
 const storage = multer.diskStorage({
@@ -97,40 +130,31 @@ app.get('/api/hello', (req, res) => {
   res.json({ message: 'Hello from jobAI backend', env: process.env.NODE_ENV || 'development' });
 });
 
-/** Return encoded Gemini API key for the identified user. Backend has the key; frontend gets only an encrypted blob.
- *  When you add auth (e.g. Clerk), only return encodedKey if the request is from the identified person. */
-app.get('/api/gemini-key', (req, res) => {
-  const rawKey = (process.env.GEMINI_API_KEY || '').trim();
-  if (!rawKey) {
-    return res.status(503).json({ error: 'Gemini API key not configured on server' });
-  }
-  const encodingKey = getEncodingKey();
-  if (!encodingKey) {
-    return res.status(503).json({ error: 'Server encoding secret not set (GEMINI_KEY_ENCODING_SECRET)' });
-  }
-  const encodedKey = encodeGeminiKey(rawKey);
-  if (!encodedKey) {
-    return res.status(500).json({ error: 'Failed to encode key' });
-  }
-  res.json({ encodedKey });
-});
+/** Save user's Gemini API key (Clerk auth required). Key is encrypted at rest in DB. */
+if (hasClerk) {
+  app.put('/api/user/gemini-key', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const userId = auth.userId;
+    if (!hasEncryptionSecret()) return res.status(503).json({ error: 'ENCRYPTION_SECRET not set' });
+    const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+    if (!apiKey) return res.status(400).json({ error: 'apiKey required' });
+    const encrypted = encryptForDb(apiKey);
+    if (!encrypted) return res.status(500).json({ error: 'Failed to encrypt key' });
+    const now = new Date().toISOString();
+    db.prepare(
+      'INSERT INTO user_gemini_keys (user_id, encrypted_key, updated_at) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET encrypted_key = ?, updated_at = ?'
+    ).run(userId, encrypted, now, encrypted, now);
+    res.json({ ok: true });
+  });
+}
 
-/** Call Gemini API for chat reply. Uses apiKey from request (raw or decoded from encodedKey) or fallback to GEMINI_API_KEY env. */
-async function getGeminiReply(message, apiKeyFromRequest, encodedKeyFromRequest) {
-  let apiKey = (typeof apiKeyFromRequest === 'string' && apiKeyFromRequest.trim())
-    ? apiKeyFromRequest.trim()
-    : '';
-  if (!apiKey && encodedKeyFromRequest) {
-    apiKey = decodeGeminiKey(encodedKeyFromRequest) || '';
-  }
-  if (!apiKey) apiKey = (process.env.GEMINI_API_KEY || '').trim();
-  if (!apiKey) return null;
-  if (!apiKey) return null;
+/** Call Gemini API for chat reply. apiKey can be raw string (legacy) or from DB (Clerk). */
+async function getGeminiReply(message, apiKey) {
+  if (!apiKey || !apiKey.trim()) return null;
   const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
-  const body = {
-    contents: [{ parts: [{ text: message }] }],
-  };
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
+  const body = { contents: [{ parts: [{ text: message }] }] };
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -146,23 +170,31 @@ async function getGeminiReply(message, apiKeyFromRequest, encodedKeyFromRequest)
   return typeof text === 'string' ? text.trim() : null;
 }
 
-/** Chat: frontend sends message and optional apiKey or encodedKey; backend decodes encodedKey or uses apiKey/env. */
+/** Chat: with Clerk – use key from DB for authenticated user. Without Clerk – use apiKey/encodedKey in body or env. */
 app.post('/api/chat', async (req, res) => {
   console.log('\n[CHAT] <<< Received from frontend');
   const message = req.body?.message;
-  const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey : undefined;
-  const encodedKey = typeof req.body?.encodedKey === 'string' ? req.body.encodedKey : undefined;
   if (typeof message !== 'string' || !message.trim()) {
-    console.log('[CHAT] bad request: message missing or not a string. body keys:', Object.keys(req.body || {}));
     return res.status(400).json({ error: 'message required' });
+  }
+  let apiKey = null;
+  if (hasClerk && getAuth(req).userId) {
+    const userId = getAuth(req).userId;
+    const row = db.prepare('SELECT encrypted_key FROM user_gemini_keys WHERE user_id = ?').get(userId);
+    if (row && row.encrypted_key) apiKey = decryptFromDb(row.encrypted_key);
+  }
+  if (!apiKey) {
+    const raw = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+    const encoded = typeof req.body?.encodedKey === 'string' ? req.body.encodedKey : null;
+    if (raw) apiKey = raw;
+    else if (encoded) apiKey = decodeGeminiKey(encoded) || '';
+    else apiKey = (process.env.GEMINI_API_KEY || '').trim();
   }
   console.log('[CHAT] message from frontend: "%s"', message.trim().slice(0, 200));
   let reply = 'No response';
-  const geminiReply = await getGeminiReply(message.trim(), apiKey, encodedKey);
+  const geminiReply = await getGeminiReply(message.trim(), apiKey);
   if (geminiReply) reply = geminiReply;
-  else if (!apiKey?.trim() && !encodedKey && !process.env.GEMINI_API_KEY?.trim()) {
-    console.log('[CHAT] No API key in request and GEMINI_API_KEY not set – replying "No response"');
-  }
+  else if (!apiKey) console.log('[CHAT] No API key (set in Settings when using Clerk, or send apiKey/env)');
   console.log('[CHAT] >>> Sending reply to frontend: "%s"\n', reply.slice(0, 200));
   return res.json({ reply });
 });

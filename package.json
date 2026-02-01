@@ -11,6 +11,8 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@clerk/express": "^1.7.0",
+    "better-sqlite3": "^11.6.0",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.21.0",

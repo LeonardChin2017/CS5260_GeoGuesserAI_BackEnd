@@ -14,8 +14,8 @@ Two options: **App Platform** (easiest, managed) or **Droplet** (full control).
    - **Run Command:** `npm start`
    - **HTTP Port:** `3001`
 5. **Environment Variables** (App-level → Edit):
-   - `GEMINI_API_KEY` = your Gemini API key ([Google AI Studio](https://aistudio.google.com/apikey))
-   - `GEMINI_KEY_ENCODING_SECRET` = a secret (min 16 chars). Generate:  
+   - `CLERK_SECRET_KEY` = your Clerk Secret Key ([dashboard](https://dashboard.clerk.com) → API Keys)
+   - `ENCRYPTION_SECRET` = a secret (min 16 chars). Generate:  
      `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
    - `NODE_ENV` = `production` (optional)
 6. **Deploy.** Your backend URL will be like `https://your-app-xxxxx.ondigitalocean.app`.
@@ -36,8 +36,8 @@ If you prefer to use the Dockerfile (e.g. same image locally and in production):
    cd your-repo/Backend
    docker build -t jobai-backend .
    docker run -d --restart unless-stopped -p 3001:3001 \
-     -e GEMINI_API_KEY="your-key" \
-     -e GEMINI_KEY_ENCODING_SECRET="your-secret" \
+     -e CLERK_SECRET_KEY="your-clerk-secret" \
+     -e ENCRYPTION_SECRET="your-secret" \
      --name jobai-backend jobai-backend
    ```
    Use a reverse proxy (e.g. Nginx) and Let's Encrypt for HTTPS in front of port 3001.
@@ -74,11 +74,11 @@ If you prefer to use the Dockerfile (e.g. same image locally and in production):
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GEMINI_API_KEY` | Yes (for chat) | Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey) |
-| `GEMINI_KEY_ENCODING_SECRET` | Yes (for encoded key) | Min 16 characters; used to encrypt the key sent to frontend via GET /api/gemini-key |
+| `CLERK_SECRET_KEY` | Yes | Clerk Secret Key from [dashboard](https://dashboard.clerk.com) → API Keys. Backend verifies JWT and stores Gemini key per user. |
+| `ENCRYPTION_SECRET` | Yes | Min 16 characters; encrypts Gemini API keys at rest in the database. Generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` |
 | `PORT` | No | Default 3001. Set by App Platform automatically |
 
-Optional: `GEMINI_MODEL` (default `gemini-2.5-flash`).
+Optional: `GEMINI_API_KEY` (only when Clerk is not used); `GEMINI_MODEL` (default `gemini-2.5-flash`).
 
 ---
 
