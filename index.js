@@ -86,7 +86,15 @@ db.exec(`
     updated_at TEXT NOT NULL
   )
 `);
-if (hasClerk) console.log('[BACKEND] Clerk + DB: user Gemini keys and chat stored in', DB_PATH);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_resume (
+    user_id TEXT PRIMARY KEY,
+    file_path TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    uploaded_at TEXT NOT NULL
+  )
+`);
+if (hasClerk) console.log('[BACKEND] Clerk + DB: user Gemini keys, chat, and resume stored in', DB_PATH);
 
 // Directory for uploaded resumes (create if missing)
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
@@ -103,8 +111,14 @@ if (hasClerk) {
   app.use(clerk.clerkMiddleware());
 }
 
+// Store resumes in per-user subfolders (uploads/userId/) for 100+ users; anonymous uploads go to uploads/
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
+  destination: (req, file, cb) => {
+    const userId = hasClerk && getAuth(req)?.userId;
+    const dir = userId ? path.join(UPLOADS_DIR, userId) : UPLOADS_DIR;
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
   filename: (req, file, cb) => {
     const safe = (file.originalname || 'resume').replace(/[^a-zA-Z0-9._-]/g, '_');
     const name = `${Date.now()}-${safe}`;
@@ -426,17 +440,69 @@ app.post('/api/chat', async (req, res) => {
   });
 });
 
-/** Resume upload: frontend sends file, backend saves to local uploads/ and logs */
+/** Resume upload: saves to uploads/ or uploads/{userId}/. When Clerk is used, one resume per user in DB; files stored per-user for 100+ users. */
 app.post('/api/resume/upload', upload.single('file'), (req, res) => {
   console.log('\n[RESUME] <<< Received upload from frontend');
   if (!req.file) {
     console.log('[RESUME] bad request: no file in request');
     return res.status(400).json({ error: 'file required' });
   }
-  const savedPath = path.join(UPLOADS_DIR, req.file.filename);
-  console.log('[RESUME] saved to local: %s (original name: %s, size: %s bytes)\n', savedPath, req.file.originalname, req.file.size);
-  res.json({ ok: true, savedPath: req.file.filename, originalName: req.file.originalname });
+  const fileName = req.file.filename;
+  const originalName = req.file.originalname || req.file.filename;
+  const now = new Date().toISOString();
+  if (hasClerk && getAuth(req)?.userId) {
+    const userId = getAuth(req).userId;
+    const relativePath = `${userId}/${fileName}`; // stored path: userId/filename for per-user folders
+    const prev = db.prepare('SELECT file_path FROM user_resume WHERE user_id = ?').get(userId);
+    if (prev?.file_path) {
+      const oldPath = path.join(UPLOADS_DIR, prev.file_path);
+      if (fs.existsSync(oldPath)) {
+        try {
+          fs.unlinkSync(oldPath);
+        } catch (e) {
+          console.log('[RESUME] could not remove previous file:', e.message);
+        }
+      }
+    }
+    db.prepare(
+      'INSERT INTO user_resume (user_id, file_path, original_name, uploaded_at) VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET file_path = ?, original_name = ?, uploaded_at = ?'
+    ).run(userId, relativePath, originalName, now, relativePath, originalName, now);
+    console.log('[RESUME] saved for user %s: %s (original: %s)\n', userId, relativePath, originalName);
+  } else {
+    console.log('[RESUME] saved to local: %s (original: %s, size: %s bytes)\n', fileName, originalName, req.file.size);
+  }
+  res.json({ ok: true, savedPath: fileName, originalName, uploadedAt: now });
 });
+
+/** Get current user's resume info (Clerk required). Returns { fileName, originalName, uploadedAt } or 404. */
+if (hasClerk) {
+  app.get('/api/resume', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const row = db.prepare('SELECT file_path, original_name, uploaded_at FROM user_resume WHERE user_id = ?').get(auth.userId);
+    if (!row) return res.status(404).json({ error: 'No resume' });
+    res.json({ fileName: row.file_path, originalName: row.original_name, uploadedAt: row.uploaded_at });
+  });
+
+  /** Delete current user's resume from backend (file + DB). */
+  app.delete('/api/resume', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const row = db.prepare('SELECT file_path FROM user_resume WHERE user_id = ?').get(auth.userId);
+    if (!row) return res.status(404).json({ error: 'No resume' });
+    const filePath = path.join(UPLOADS_DIR, row.file_path);
+    if (fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch (e) {
+        console.log('[RESUME] delete file error:', e.message);
+      }
+    }
+    db.prepare('DELETE FROM user_resume WHERE user_id = ?').run(auth.userId);
+    console.log('[RESUME] deleted for user %s\n', auth.userId);
+    res.json({ ok: true });
+  });
+}
 
 app.listen(PORT, () => {
   console.log(`jobAI backend running at http://localhost:${PORT}`);
