@@ -17,6 +17,94 @@ const hasEncryptionSecret = () => {
   const s = process.env.ENCRYPTION_SECRET || process.env.GEMINI_KEY_ENCODING_SECRET || '';
   return s && s.length >= 16;
 };
+const clerkMissingMessage = 'Clerk backend is not configured. Set CLERK_SECRET_KEY and CLERK_PUBLISHABLE_KEY, then restart the backend.';
+
+const googleClientId = (process.env.GOOGLE_CLIENT_ID || '').trim();
+const googleClientSecret = (process.env.GOOGLE_CLIENT_SECRET || '').trim();
+const googleRedirectUri = (process.env.GOOGLE_OAUTH_REDIRECT_URI || '').trim();
+const googleScopes = (process.env.GMAIL_OAUTH_SCOPES || 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile').trim();
+const jobStreetGoogleLoginUrl = (process.env.JOBSTREET_GOOGLE_LOGIN_URL || 'https://www.jobstreet.com.sg/en/login').trim();
+const pendingGoogleOAuthStates = new Map();
+const GOOGLE_STATE_TTL_MS = 10 * 60 * 1000;
+
+function isGoogleOAuthConfigured() {
+  return !!(googleClientId && googleClientSecret && googleRedirectUri && hasEncryptionSecret());
+}
+
+function createGoogleOAuthState(payload) {
+  const state = crypto.randomBytes(18).toString('hex');
+  pendingGoogleOAuthStates.set(state, {
+    ...payload,
+    expiresAt: Date.now() + GOOGLE_STATE_TTL_MS,
+  });
+  return state;
+}
+
+function consumeGoogleOAuthState(state) {
+  if (!state || typeof state !== 'string') return null;
+  const entry = pendingGoogleOAuthStates.get(state);
+  if (!entry) return null;
+  pendingGoogleOAuthStates.delete(state);
+  if (entry.expiresAt < Date.now()) return null;
+  return entry;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of pendingGoogleOAuthStates.entries()) {
+    if (value.expiresAt < now) pendingGoogleOAuthStates.delete(key);
+  }
+}, GOOGLE_STATE_TTL_MS).unref?.();
+
+function buildGoogleOAuthUrl(state) {
+  const params = new URLSearchParams({
+    client_id: googleClientId,
+    redirect_uri: googleRedirectUri,
+    response_type: 'code',
+    access_type: 'offline',
+    include_granted_scopes: 'true',
+    prompt: 'consent',
+    scope: googleScopes,
+    state,
+  });
+  return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+}
+
+function sendGmailCallbackPage(res, { success, message }) {
+  const safeMessage = (message || '').replace(/[<>]/g, (ch) => (ch === '<' ? '&lt;' : '&gt;')) || (success ? 'Gmail connected. You may close this tab.' : 'Unable to connect Gmail.');
+  const title = success ? 'Gmail connected' : 'Gmail connection failed';
+  const color = success ? '#065f46' : '#b91c1c';
+  const border = success ? '#34d399' : '#f87171';
+  const statusText = success ? 'Success' : 'Error';
+  const html = `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>${title}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+      .card { background: rgba(15,23,42,0.9); border-radius: 16px; padding: 32px; border: 1px solid ${border}; max-width: 460px; box-shadow: 0 25px 70px rgba(15,23,42,0.65); text-align: center; }
+      h1 { margin: 0 0 12px; font-size: 24px; }
+      p { margin: 0; line-height: 1.5; font-size: 15px; }
+      .status { font-size: 13px; letter-spacing: 0.2em; text-transform: uppercase; color: ${color}; margin-bottom: 16px; }
+      .hint { margin-top: 18px; font-size: 13px; opacity: 0.75; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="status">${statusText}</div>
+      <h1>${title}</h1>
+      <p>${safeMessage}</p>
+      <p class="hint">You can close this tab and return to jobAI.</p>
+    </div>
+    <script>
+      setTimeout(() => { try { window.close(); } catch (_) {} }, ${success ? 2500 : 6000});
+    </script>
+  </body>
+</html>`;
+  res.status(success ? 200 : 400).send(html);
+}
 
 /** Derive a 32-byte key for AES-256 (DB at-rest encryption). */
 function getEncryptionKey() {
@@ -62,6 +150,48 @@ function decryptFromDb(encoded) {
 /** Legacy: decode encodedKey from frontend (backward compat when not using Clerk). */
 function decodeGeminiKey(encoded) {
   return decryptFromDb(encoded);
+}
+
+function getStoredEmailTokens(userId, provider) {
+  if (!userId || !provider) return null;
+  let row;
+  try {
+    row = db.prepare('SELECT encrypted_tokens FROM user_email_tokens WHERE user_id = ? AND provider = ?').get(userId, provider);
+  } catch {
+    row = null;
+  }
+  if (!row?.encrypted_tokens) return null;
+  const plain = decryptFromDb(row.encrypted_tokens);
+  if (!plain) return null;
+  try {
+    return JSON.parse(plain);
+  } catch {
+    return null;
+  }
+}
+
+function saveEmailTokens({ userId, provider, tokens, email, scope, expiresAt }) {
+  if (!userId || !provider || !tokens) return false;
+  const encrypted = encryptForDb(JSON.stringify(tokens));
+  if (!encrypted) return false;
+  const now = new Date().toISOString();
+  db.prepare(
+    'INSERT INTO user_email_tokens (user_id, provider, email, encrypted_tokens, scope, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, provider) DO UPDATE SET email = excluded.email, encrypted_tokens = excluded.encrypted_tokens, scope = excluded.scope, expires_at = excluded.expires_at, updated_at = excluded.updated_at'
+  ).run(userId, provider, email || null, encrypted, scope || null, expiresAt || null, now, now);
+  return true;
+}
+
+async function revokeGoogleToken(token) {
+  if (!token) return;
+  try {
+    await fetch('https://oauth2.googleapis.com/revoke', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ token }),
+    });
+  } catch {
+    // ignore revoke errors
+  }
 }
 
 const app = express();
@@ -142,6 +272,19 @@ db.exec(`
   )
 `);
 db.exec(`
+  CREATE TABLE IF NOT EXISTS user_email_tokens (
+    user_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    email TEXT,
+    encrypted_tokens TEXT NOT NULL,
+    scope TEXT,
+    expires_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, provider)
+  )
+`);
+db.exec(`
   CREATE TABLE IF NOT EXISTS backend_activity (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT,
@@ -169,6 +312,94 @@ if (hasClerk) {
   getAuth = clerk.getAuth;
   app.use(clerk.clerkMiddleware());
 }
+
+app.get('/api/email/gmail/callback', async (req, res) => {
+  if (!isGoogleOAuthConfigured()) {
+    return sendGmailCallbackPage(res, { success: false, message: 'Backend missing Google OAuth configuration. Ask your jobAI admin to set GOOGLE_CLIENT_ID/SECRET and GOOGLE_OAUTH_REDIRECT_URI.' });
+  }
+  if (typeof req.query?.error === 'string' && req.query.error) {
+    return sendGmailCallbackPage(res, { success: false, message: `Google returned an error: ${req.query.error}` });
+  }
+  const code = typeof req.query?.code === 'string' ? req.query.code : null;
+  const stateParam = typeof req.query?.state === 'string' ? req.query.state : null;
+  if (!stateParam) {
+    return sendGmailCallbackPage(res, { success: false, message: 'Missing OAuth state. Please restart Gmail Connect from jobAI Settings.' });
+  }
+  const stateData = consumeGoogleOAuthState(stateParam);
+  if (!stateData?.userId) {
+    return sendGmailCallbackPage(res, { success: false, message: 'Your login session expired. Please start the Gmail connection again from jobAI.' });
+  }
+  if (!code) {
+    return sendGmailCallbackPage(res, { success: false, message: 'Authorization code not provided by Google.' });
+  }
+  try {
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: googleClientId,
+        client_secret: googleClientSecret,
+        redirect_uri: googleRedirectUri,
+        grant_type: 'authorization_code',
+      }),
+    });
+    const tokenJson = await tokenRes.json().catch(() => ({}));
+    if (!tokenRes.ok || !tokenJson?.access_token) {
+      const errMsg = tokenJson?.error_description || tokenJson?.error || 'Failed to exchange authorization code with Google.';
+      throw new Error(errMsg);
+    }
+    const existingTokens = getStoredEmailTokens(stateData.userId, 'gmail');
+    const expiresAtIso = tokenJson.expires_in ? new Date(Date.now() + Number(tokenJson.expires_in) * 1000).toISOString() : null;
+    const storedTokens = {
+      access_token: tokenJson.access_token,
+      refresh_token: tokenJson.refresh_token || existingTokens?.refresh_token || null,
+      scope: tokenJson.scope || googleScopes,
+      token_type: tokenJson.token_type || 'Bearer',
+      id_token: tokenJson.id_token || null,
+      expires_in: tokenJson.expires_in || null,
+      obtained_at: Date.now(),
+    };
+    let profileEmail = null;
+    try {
+      const profileRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+        headers: { Authorization: `Bearer ${tokenJson.access_token}` },
+      });
+      if (profileRes.ok) {
+        const profile = await profileRes.json().catch(() => ({}));
+        if (profile?.email) profileEmail = profile.email;
+      }
+    } catch {
+      // ignore profile fetch errors
+    }
+    const saved = saveEmailTokens({
+      userId: stateData.userId,
+      provider: 'gmail',
+      tokens: storedTokens,
+      email: profileEmail,
+      scope: storedTokens.scope,
+      expiresAt: expiresAtIso,
+    });
+    if (!saved) throw new Error('Server was unable to store Gmail credentials. Contact support.');
+    recordBackendActivity(stateData.userId, {
+      source: 'email',
+      type: 'agent_step',
+      message: profileEmail ? `Gmail connected (${profileEmail}).` : 'Gmail connected.',
+    });
+    return sendGmailCallbackPage(res, {
+      success: true,
+      message: profileEmail ? `Gmail connected as ${profileEmail}. You can close this tab.` : 'Gmail connected. You can close this tab.',
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unexpected error while connecting Gmail.';
+    recordBackendActivity(stateData.userId, {
+      source: 'email',
+      type: 'agent_step',
+      message: `Gmail connect failed: ${msg}`,
+    });
+    return sendGmailCallbackPage(res, { success: false, message: msg });
+  }
+});
 
 // Store resumes in per-user subfolders (uploads/userId/) for 100+ users; anonymous uploads go to uploads/
 const storage = multer.diskStorage({
@@ -209,8 +440,17 @@ function summarizeActivityForFrontend(source, type, message, payload) {
 }
 
 /** Record backend activity for the frontend. Agent summarizes to one line before storing. */
-function recordBackendActivity(req, { source, type, message, payload }) {
-  const userId = hasClerk && typeof getAuth === 'function' && getAuth(req)?.userId ? getAuth(req).userId : null;
+function recordBackendActivity(reqOrUserId, { source, type, message, payload }) {
+  let userId = null;
+  if (typeof reqOrUserId === 'string') {
+    userId = reqOrUserId;
+  } else if (reqOrUserId && hasClerk && typeof getAuth === 'function') {
+    try {
+      userId = getAuth(reqOrUserId)?.userId || null;
+    } catch {
+      userId = null;
+    }
+  }
   const oneLine = summarizeActivityForFrontend(source, type, message, payload);
   const now = new Date().toISOString();
   const payloadJson = payload != null ? JSON.stringify(payload) : null;
@@ -490,6 +730,72 @@ if (hasClerk) {
     db.prepare('DELETE FROM user_portal_credentials WHERE user_id = ? AND portal = ?').run(auth.userId, portal);
     res.json({ ok: true, portal });
   });
+
+  app.get('/api/email/gmail/status', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    let row;
+    try {
+      row = db.prepare('SELECT email, expires_at FROM user_email_tokens WHERE user_id = ? AND provider = ?').get(auth.userId, 'gmail');
+    } catch {
+      row = null;
+    }
+    if (!row) return res.json({ connected: false });
+    res.json({ connected: true, email: row.email || null, expiresAt: row.expires_at || null });
+  });
+
+  app.post('/api/email/gmail/connect', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    if (!isGoogleOAuthConfigured()) {
+      return res.status(503).json({ error: 'Google OAuth is not configured on the backend (set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI, ENCRYPTION_SECRET).' });
+    }
+    const state = createGoogleOAuthState({ userId: auth.userId, purpose: 'gmail-connect' });
+    const authUrl = buildGoogleOAuthUrl(state);
+    recordBackendActivity(req, { source: 'email', type: 'agent_step', message: 'Launching Gmail OAuth connect flow.' });
+    res.json({ authUrl });
+  });
+
+  app.delete('/api/email/gmail/connect', async (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const userId = auth.userId;
+    const tokens = getStoredEmailTokens(userId, 'gmail');
+    db.prepare('DELETE FROM user_email_tokens WHERE user_id = ? AND provider = ?').run(userId, 'gmail');
+    if (tokens?.refresh_token) await revokeGoogleToken(tokens.refresh_token);
+    else if (tokens?.access_token) await revokeGoogleToken(tokens.access_token);
+    recordBackendActivity(req, { source: 'email', type: 'agent_step', message: 'Gmail disconnected.' });
+    res.json({ ok: true });
+  });
+
+  app.post('/api/user/portal-google-login', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const url = jobStreetGoogleLoginUrl && jobStreetGoogleLoginUrl.startsWith('http')
+      ? jobStreetGoogleLoginUrl
+      : 'https://www.jobstreet.com.sg/en/login';
+    res.json({ authUrl: url });
+  });
+} else {
+  const respondClerkMissing = (req, res) => res.status(503).json({ error: clerkMissingMessage });
+  app.get('/api/user/gemini-key', respondClerkMissing);
+  app.put('/api/user/gemini-key', respondClerkMissing);
+  app.delete('/api/user/gemini-key', respondClerkMissing);
+  app.get('/api/user/deepseek-key', respondClerkMissing);
+  app.put('/api/user/deepseek-key', respondClerkMissing);
+  app.delete('/api/user/deepseek-key', respondClerkMissing);
+  app.get('/api/user/llm-provider', respondClerkMissing);
+  app.put('/api/user/llm-provider', respondClerkMissing);
+  app.get('/api/user/chat', respondClerkMissing);
+  app.post('/api/user/chat', respondClerkMissing);
+  app.delete('/api/user/chat', respondClerkMissing);
+  app.get('/api/user/portal-credentials', respondClerkMissing);
+  app.put('/api/user/portal-credentials', respondClerkMissing);
+  app.delete('/api/user/portal-credentials', respondClerkMissing);
+  app.get('/api/email/gmail/status', respondClerkMissing);
+  app.post('/api/email/gmail/connect', respondClerkMissing);
+  app.delete('/api/email/gmail/connect', respondClerkMissing);
+  app.post('/api/user/portal-google-login', respondClerkMissing);
 }
 
 /** JobAI agent system prompt: persona + tools (results injected by backend). No markdown—frontend shows plain text only. */

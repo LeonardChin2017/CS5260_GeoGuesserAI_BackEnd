@@ -30,6 +30,11 @@ Copy `.env.example` to `.env` and set:
 | `GEMINI_API_KEY` | No | Only for fallback when Clerk is not configured (key in request body or env) |
 | `PORT` | No | Default 3001 |
 | `GEMINI_MODEL` | No | Default gemini-2.5-flash |
+| `GOOGLE_CLIENT_ID` | Optional (required for Gmail connect) | Google OAuth client ID (Web) used to connect Gmail. Authorized redirect must point to `/api/email/gmail/callback`. |
+| `GOOGLE_CLIENT_SECRET` | Optional (required for Gmail connect) | Google OAuth client secret matching the client ID above. |
+| `GOOGLE_OAUTH_REDIRECT_URI` | Optional (required for Gmail connect) | Full HTTPS URL to the callback endpoint, e.g. `https://your-backend/api/email/gmail/callback`. Must match the OAuth client config. |
+| `GMAIL_OAUTH_SCOPES` | No | Space-separated scopes for Gmail connect. Defaults to read-only Gmail + userinfo scopes. |
+| `JOBSTREET_GOOGLE_LOGIN_URL` | No | Override the URL returned by `/api/user/portal-google-login` (defaults to JobStreet’s standard login page). |
 
 Never commit `.env`; it is in `.gitignore`. User Gemini keys are stored in SQLite under `data/` (encrypted).
 
@@ -67,6 +72,11 @@ After deploy, set the frontend `VITE_API_URL` to your backend URL (e.g. `https:/
 | `/api/resume` | DELETE | Delete current user's resume (Clerk required). |
 | `/api/user/links` | GET | Get current user's links. Response `{ links: string[] }` (Clerk required). |
 | `/api/user/links` | PUT | Save current user's links. Body `{ links: string[] }` (Clerk required). Stored only; see **Links (placeholder)** below. |
+| `/api/email/gmail/status` | GET | Gmail connection status. Response `{ connected, email? }` (Clerk required). |
+| `/api/email/gmail/connect` | POST | Start Gmail OAuth (returns `{ authUrl }`). Clerk auth required. |
+| `/api/email/gmail/connect` | DELETE | Disconnect Gmail + revoke tokens (Clerk required). |
+| `/api/email/gmail/callback` | GET | Google OAuth callback. Displays success/error page and stores tokens. |
+| `/api/user/portal-google-login` | POST | Returns `{ authUrl }` pointing to JobStreet’s Google login (Clerk required). |
 
 ---
 
