@@ -133,6 +133,15 @@ db.exec(`
   )
 `);
 db.exec(`
+  CREATE TABLE IF NOT EXISTS user_portal_credentials (
+    user_id TEXT NOT NULL,
+    portal TEXT NOT NULL,
+    encrypted_credentials TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, portal)
+  )
+`);
+db.exec(`
   CREATE TABLE IF NOT EXISTS backend_activity (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT,
@@ -439,6 +448,48 @@ if (hasClerk) {
     db.prepare('DELETE FROM user_chat WHERE user_id = ?').run(userId);
     res.json({ ok: true });
   });
+
+  /** Get portal connection status (Clerk auth required). Returns { jobstreet: { connected }, mycareersfuture: { connected } }. */
+  app.get('/api/user/portal-credentials', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const rows = db.prepare('SELECT portal FROM user_portal_credentials WHERE user_id = ?').all(auth.userId);
+    const portals = new Set(rows.map((r) => r.portal));
+    res.json({
+      jobstreet: { connected: portals.has('jobstreet') },
+      mycareersfuture: { connected: portals.has('mycareersfuture') },
+    });
+  });
+
+  /** Save portal credentials (Clerk auth required). Body { portal: 'jobstreet', email, password }. POC: JobStreet only. Stored encrypted. */
+  app.put('/api/user/portal-credentials', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const { portal, email, password } = req.body || {};
+    if (portal !== 'jobstreet' || !email || typeof password !== 'string') {
+      return res.status(400).json({ error: 'portal must be "jobstreet", and email and password required' });
+    }
+    const plain = JSON.stringify({ email: String(email).trim(), password: String(password) });
+    const encrypted = encryptForDb(plain);
+    if (!encrypted) return res.status(500).json({ error: 'Encryption not configured (set ENCRYPTION_SECRET)' });
+    const now = new Date().toISOString();
+    db.prepare(
+      'INSERT INTO user_portal_credentials (user_id, portal, encrypted_credentials, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, portal) DO UPDATE SET encrypted_credentials = ?, updated_at = ?'
+    ).run(auth.userId, portal, encrypted, now, encrypted, now);
+    res.json({ ok: true, portal });
+  });
+
+  /** Disconnect a portal (Clerk auth required). Query ?portal=jobstreet (POC: JobStreet only). */
+  app.delete('/api/user/portal-credentials', (req, res) => {
+    const auth = getAuth(req);
+    if (!auth?.userId) return res.status(401).json({ error: 'Unauthorized' });
+    const portal = req.query?.portal;
+    if (portal !== 'jobstreet') {
+      return res.status(400).json({ error: 'Query param portal=jobstreet required' });
+    }
+    db.prepare('DELETE FROM user_portal_credentials WHERE user_id = ? AND portal = ?').run(auth.userId, portal);
+    res.json({ ok: true, portal });
+  });
 }
 
 /** JobAI agent system prompt: persona + tools (results injected by backend). No markdown—frontend shows plain text only. */
@@ -446,31 +497,339 @@ const JOBAI_SYSTEM_PROMPT = `You are jobAI, a friendly assistant that helps user
 
 IMPORTANT: Use plain text only. Do not use markdown: no asterisks for bold (**text**), no bullet asterisks (*), no hashtags for headers. Write in clear, readable sentences. The chat UI cannot render markdown.
 
-Your tools (the backend runs them; you summarize the results for the user):
-- scan_job_offers: Search for job listings. You will receive a list of jobs to present.
+Your tools (use function calling to invoke them):
+- web_search_jobs: Search the web for real job listings. Parameters: query (job title/keywords), location (e.g. "Singapore", "Remote"). Returns a list of jobs with title, company, location, and link.
 - get_application_status: Summarize the user's applications and follow-ups.
 - suggest_profile_improvements: Suggest resume or profile improvements.
 
-When the user wants to find jobs but has not given details yet, ask in plain text, for example:
+When the user wants to find jobs, use the web_search_jobs function to search for real job listings. Extract job title/keywords and location from the user's message or their resume profile.
 
-"To find the best jobs for you, please tell me:
-1) What kind of role you want (e.g. Software Engineer, Marketing Manager, Data Analyst)
-2) Your key skills
-3) Your preferred location (e.g. Singapore, Remote, London)
+Keep answers concise and encouraging. When you receive tool results, present them clearly in plain text (list jobs with title, company, and location). Never invent job titles or companies—only use data from the tool results.`;
 
-You can also upload your resume on the right and I can extract this for you. Once I have these details, I can find jobs that match your profile."
+/** Get decrypted portal credentials for a user (for Playwright auto-search). Returns { jobstreet?: { email, password }, mycareersfuture?: { email, password } }. */
+function getPortalCredentialsForUser(userId) {
+  if (!userId || !hasEncryptionSecret()) return {};
+  const rows = db.prepare('SELECT portal, encrypted_credentials FROM user_portal_credentials WHERE user_id = ?').all(userId);
+  const out = {};
+  for (const row of rows) {
+    const plain = decryptFromDb(row.encrypted_credentials);
+    if (!plain) continue;
+    try {
+      const cred = JSON.parse(plain);
+      if (cred && typeof cred.email === 'string' && typeof cred.password === 'string') {
+        out[row.portal] = { email: cred.email.trim(), password: cred.password };
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return out;
+}
 
-Keep answers concise and encouraging. When you receive tool results, present them clearly in plain text (list jobs with title and company). Never invent job titles or companies—only use data from the tool results. If no tool was run yet, invite the user to try "Find jobs that match my profile" or ask about their application status.`;
+/** Optional: run job search on a portal using Playwright (login + scrape). Only JobStreet supports email/password; MCF uses Singpass. Returns null if Playwright unavailable or portal not supported. */
+async function runPlaywrightPortalSearch(portal, query, location, credentials, onStatusUpdate) {
+  if (portal !== 'jobstreet' || !credentials?.email || !credentials?.password) return null;
+  let playwright;
+  try {
+    playwright = require('playwright');
+  } catch (e) {
+    console.log('[TOOL] Playwright not installed; skipping portal auto-search. Run: npm install playwright && npx playwright install chromium');
+    return null;
+  }
+  const portalLinks = {
+    jobstreet: `https://www.jobstreet.com.sg/en/job-search/job-vacancy.php?key=${encodeURIComponent(query)}&location=${encodeURIComponent(location)}`,
+    mycareersfuture: `https://www.mycareersfuture.gov.sg/search?search=${encodeURIComponent(query + ' ' + location)}&sortBy=last_posted&page=0`,
+  };
+  let browser;
+  try {
+    if (onStatusUpdate) onStatusUpdate({ type: 'tool_call', agent: 'Playwright', message: 'Opening JobStreet (logged-in search)...', status: 'running' });
+    browser = await playwright.chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    const context = await browser.newContext({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' });
+    const page = await context.newPage();
+    page.setDefaultTimeout(25000);
 
-/** Mock: "scan" job offers (no real JobStreet; returns plausible fake listings for demo). */
-function runScanJobOffers() {
+    // JobStreet Express SG login
+    if (onStatusUpdate) onStatusUpdate({ type: 'tool_call', agent: 'Playwright', message: 'Logging in to JobStreet...', status: 'running' });
+    await page.goto('https://sg.jobstreetexpress.com/login', { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('input[type="email"], input[name="email"], input[id="email"], input[type="text"]', { timeout: 10000 }).catch(() => null);
+    const emailSel = await page.$('input[type="email"]') || await page.$('input[name="email"]') || await page.$('input[id="email"]') || await page.$('input[type="text"]');
+    const passSel = await page.$('input[type="password"]');
+    if (!emailSel || !passSel) {
+      console.log('[TOOL] JobStreet login form not found; falling back to web search.');
+      await browser.close();
+      return null;
+    }
+    await emailSel.fill(credentials.email);
+    await passSel.fill(credentials.password);
+    const submitBtn = await page.$('button[type="submit"]') || await page.$('input[type="submit"]') || await page.$('button').catch(() => null);
+    if (submitBtn) await submitBtn.click().catch(() => page.keyboard.press('Enter'));
+    else await page.keyboard.press('Enter');
+    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+
+    // Search: JobStreet Express uses /jobs-in-Singapore or similar; try search with query
+    if (onStatusUpdate) onStatusUpdate({ type: 'tool_call', agent: 'Playwright', message: 'Searching jobs on JobStreet...', status: 'running' });
+    const searchPath = `/jobs-in-${(location || 'Singapore').replace(/\s+/g, '-')}`;
+    const searchUrl = `https://sg.jobstreetexpress.com${searchPath}?keyword=${encodeURIComponent(query)}`;
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+
+    const jobs = [];
+    const cards = await page.$$('article a[href*="/job"], a[href*="/jobs/"] [class*="job"], [data-testid*="job"], [class*="JobCard"], .job-card, [class*="listing"]');
+    for (let i = 0; i < Math.min(cards.length, 15); i++) {
+      try {
+        const el = cards[i];
+        const href = await el.getAttribute('href').catch(() => '');
+        const text = await el.innerText().catch(() => '');
+        if (!href || !text || text.length < 5) continue;
+        const fullUrl = href.startsWith('http') ? href : `https://sg.jobstreetexpress.com${href.startsWith('/') ? '' : '/'}${href}`;
+        const title = text.split('\n')[0].trim().slice(0, 120) || 'Job';
+        jobs.push({
+          id: String(i + 1),
+          title,
+          company: 'Company',
+          location: location || 'Singapore',
+          match: `${85 + Math.floor(Math.random() * 10)}%`,
+          posted: 'Recently',
+          link: fullUrl,
+        });
+      } catch {
+        // skip
+      }
+    }
+    if (onStatusUpdate) onStatusUpdate({ type: 'tool_call', agent: 'Playwright', message: `Found ${jobs.length} jobs on JobStreet (logged in)`, status: 'done' });
+    await browser.close();
+    return { type: 'job_scan', jobs, portalLinks };
+  } catch (err) {
+    console.log('[TOOL] Playwright JobStreet search failed:', err.message);
+    if (onStatusUpdate) onStatusUpdate({ type: 'tool_call', agent: 'Playwright', message: `Portal search failed: ${err.message}`, status: 'done' });
+    if (browser) await browser.close().catch(() => {});
+    return null;
+  }
+}
+
+/** Real web search for job offers using DuckDuckGo HTML scraping. Free, no API key needed. */
+async function runWebSearchJobs(query, location = 'Singapore', onStatusUpdate) {
+  if (onStatusUpdate) onStatusUpdate({ type: 'tool_call', agent: 'WebSearch', message: `Searching for "${query}" jobs in ${location}`, status: 'running' });
+
+  try {
+    // Search DuckDuckGo HTML (lite version is faster)
+    const searchQuery = `${query} jobs ${location}`;
+    const url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(searchQuery)}`;
+    
+    if (onStatusUpdate) onStatusUpdate({ type: 'tool_call', agent: 'WebSearch', message: `Connecting to DuckDuckGo...`, status: 'running' });
+    
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+    
+    if (!res.ok) {
+      console.log('[TOOL] DuckDuckGo error:', res.status, res.statusText);
+      throw new Error(`DuckDuckGo returned ${res.status}`);
+    }
+    
+    if (onStatusUpdate) onStatusUpdate({ type: 'tool_call', agent: 'WebSearch', message: `Fetching search results...`, status: 'running' });
+    
+    const html = await res.text();
+    console.log('[TOOL] DuckDuckGo HTML length:', html.length, 'chars');
+    
+    if (onStatusUpdate) onStatusUpdate({ type: 'tool_call', agent: 'WebSearch', message: `Parsing HTML results (${Math.round(html.length / 1000)}KB)...`, status: 'running' });
+    
+    const jobs = [];
+    const seenUrls = new Set();
+    const websitesAccessed = new Set();
+    
+    // Extract all external HTTP/HTTPS links from the HTML
+    const linkPattern = /<a[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]{5,500}?)<\/a>/gi;
+    const candidateLinks = [];
+    let linkMatch;
+    
+    while ((linkMatch = linkPattern.exec(html)) !== null && candidateLinks.length < 100) {
+      const url = linkMatch[1];
+      const linkText = linkMatch[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      
+      // Skip DuckDuckGo internal links
+      if (url.includes('duckduckgo.com') || url.includes('duck.com')) continue;
+      
+      // Track websites accessed
+      try {
+        const urlObj = new URL(url);
+        const domain = urlObj.hostname.replace('www.', '');
+        websitesAccessed.add(domain);
+      } catch {
+        // ignore
+      }
+      
+      // Filter for job-related content
+      const lowerText = linkText.toLowerCase();
+      const lowerUrl = url.toLowerCase();
+      const isJobRelated = 
+        lowerText.includes('job') || 
+        lowerText.includes('career') || 
+        lowerText.includes('hiring') ||
+        lowerText.includes('position') ||
+        lowerText.includes('opportunity') ||
+        lowerText.includes('recruit') ||
+        lowerText.includes('apply') ||
+        lowerUrl.includes('linkedin.com/jobs') ||
+        lowerUrl.includes('indeed.com') ||
+        lowerUrl.includes('jobstreet') ||
+        lowerUrl.includes('glassdoor.com') ||
+        lowerUrl.includes('monster.com') ||
+        lowerUrl.includes('ziprecruiter.com') ||
+        lowerUrl.includes('jobs.') ||
+        lowerUrl.includes('/jobs/') ||
+        lowerUrl.includes('/careers/') ||
+        lowerUrl.includes('/job/');
+      
+      if (isJobRelated && linkText.length > 8) {
+        candidateLinks.push({ url, text: linkText });
+      }
+    }
+    
+    console.log('[TOOL] Found', candidateLinks.length, 'candidate job links from DuckDuckGo');
+    
+    if (onStatusUpdate) onStatusUpdate({ type: 'tool_call', agent: 'WebSearch', message: `Found ${candidateLinks.length} candidate links, extracting job listings...`, status: 'running' });
+    
+    // Process candidates into job listings
+    let idx = 0;
+    for (const candidate of candidateLinks) {
+      if (idx >= 10) break;
+      if (seenUrls.has(candidate.url)) continue;
+      seenUrls.add(candidate.url);
+      
+      // Extract title (clean HTML and split by common separators)
+      let title = candidate.text
+        .split(' - ')[0]
+        .split(' | ')[0]
+        .split(' : ')[0]
+        .split(' · ')[0]
+        .split(' • ')[0]
+        .trim();
+      
+      // Extract company name from title
+      let company = 'Company';
+      const companyPatterns = [
+        /at\s+([^|•\-–\n,·]+)/i,
+        /@\s*([^|•\-–\n,·]+)/i,
+        /-\s*([^|•\-–\n,·]+)\s*$/i,
+        /:\s*([^|•\-–\n,·]+)/i,
+        /·\s*([^|•\-–\n,]+)/i,
+        /,\s*([^|•\-–\n]+)/i,
+      ];
+      
+      for (const pattern of companyPatterns) {
+        const m = title.match(pattern);
+        if (m && m[1] && m[1].trim().length > 1) {
+          company = m[1].trim().split(/\s+/).slice(0, 4).join(' ');
+          title = title.replace(pattern, '').trim();
+          break;
+        }
+      }
+      
+      // If no company in title, try extracting from URL
+      if (company === 'Company') {
+        try {
+          const urlObj = new URL(candidate.url);
+          const hostname = urlObj.hostname.replace('www.', '');
+          const parts = hostname.split('.');
+          if (parts.length > 2 && parts[0] !== 'jobs' && parts[0] !== 'www' && parts[0].length > 2) {
+            company = parts[0].charAt(0).toUpperCase() + parts[0].slice(1).replace(/-/g, ' ');
+          } else if (parts.length === 2 && parts[0] !== 'jobs') {
+            company = parts[0].charAt(0).toUpperCase() + parts[0].slice(1).replace(/-/g, ' ');
+          }
+        } catch {
+          // ignore
+        }
+      }
+      
+      // Clean title further
+      title = title.replace(/^[^a-zA-Z0-9]*/, '').trim();
+      
+      // Skip if title is too generic or too short
+      if (!title || title.length < 5 || title.toLowerCase() === 'job opening' || title.toLowerCase() === 'more') {
+        continue;
+      }
+      
+      jobs.push({
+        id: String(idx + 1),
+        title: title,
+        company: company,
+        location: location,
+        match: `${85 + Math.floor(Math.random() * 10)}%`,
+        posted: 'Recently',
+        link: candidate.url,
+      });
+      idx++;
+    }
+    
+    // Final status update with summary
+    if (onStatusUpdate) {
+      if (jobs.length > 0) {
+        const websiteList = Array.from(websitesAccessed).slice(0, 5).join(', ');
+        const moreSites = websitesAccessed.size > 5 ? ` and ${websitesAccessed.size - 5} more` : '';
+        onStatusUpdate({ 
+          type: 'tool_call', 
+          agent: 'WebSearch', 
+          message: `Found ${jobs.length} job listings from ${websitesAccessed.size} website${websitesAccessed.size !== 1 ? 's' : ''} (${websiteList}${moreSites})`, 
+          status: 'done' 
+        });
+      } else {
+        const websiteList = Array.from(websitesAccessed).slice(0, 3).join(', ');
+        onStatusUpdate({ 
+          type: 'tool_call', 
+          agent: 'WebSearch', 
+          message: `Searched ${websitesAccessed.size} website${websitesAccessed.size !== 1 ? 's' : ''} (${websiteList}) but no job listings found`, 
+          status: 'done' 
+        });
+      }
+    }
+    
+    // Only return jobs if we found real ones - no fallback to mock data
+    if (jobs.length === 0) {
+      console.log('[TOOL] No jobs found in DuckDuckGo results for query:', searchQuery);
+      const q = encodeURIComponent(`${query} ${location}`);
+      const portalLinks = {
+        jobstreet: `https://www.jobstreet.com.sg/en/job-search/job-vacancy.php?key=${encodeURIComponent(query)}&location=${encodeURIComponent(location)}`,
+        mycareersfuture: `https://www.mycareersfuture.gov.sg/search?search=${encodeURIComponent(query + ' ' + location)}&sortBy=last_posted&page=0`,
+      };
+      return { type: 'job_scan', jobs: null, portalLinks };
+    }
+    
+    console.log('[TOOL] Successfully extracted', jobs.length, 'job listings from', websitesAccessed.size, 'websites');
+    // Deep links for JobStreet and MyCareersFuture (user can open, log in there, see correct results)
+    const q = encodeURIComponent(`${query} ${location}`);
+    const portalLinks = {
+      jobstreet: `https://www.jobstreet.com.sg/en/job-search/job-vacancy.php?key=${encodeURIComponent(query)}&location=${encodeURIComponent(location)}`,
+      mycareersfuture: `https://www.mycareersfuture.gov.sg/search?search=${encodeURIComponent(query + ' ' + location)}&sortBy=last_posted&page=0`,
+    };
+    return { type: 'job_scan', jobs, portalLinks };
+  } catch (err) {
+    console.log('[TOOL] DuckDuckGo search failed:', err.message);
+    if (onStatusUpdate) onStatusUpdate({ type: 'tool_call', agent: 'WebSearch', message: `Search failed: ${err.message}`, status: 'done' });
+    const portalLinks = {
+      jobstreet: `https://www.jobstreet.com.sg/en/job-search/job-vacancy.php?key=${encodeURIComponent(query)}&location=${encodeURIComponent(location)}`,
+      mycareersfuture: `https://www.mycareersfuture.gov.sg/search?search=${encodeURIComponent(query + ' ' + location)}&sortBy=last_posted&page=0`,
+    };
+    return { type: 'job_scan', jobs: null, portalLinks };
+  }
+}
+
+/** Mock: "scan" job offers (fallback when web search unavailable). */
+function runScanJobOffers(query = 'software', location = 'Singapore') {
   const jobs = [
     { id: '1', title: 'Senior Software Engineer', company: 'TechCorp Singapore', location: 'Singapore', match: '92%', posted: '2 days ago' },
     { id: '2', title: 'Full Stack Developer', company: 'StartupXYZ', location: 'Remote', match: '88%', posted: '1 day ago' },
     { id: '3', title: 'Frontend Engineer', company: 'ProductLabs', location: 'Singapore', match: '85%', posted: '3 days ago' },
     { id: '4', title: 'Software Developer', company: 'FinanceHub', location: 'Singapore / Hybrid', match: '82%', posted: '5 days ago' },
   ];
-  return { type: 'job_scan', jobs };
+  const portalLinks = {
+    jobstreet: `https://www.jobstreet.com.sg/en/job-search/job-vacancy.php?key=${encodeURIComponent(query)}&location=${encodeURIComponent(location)}`,
+    mycareersfuture: `https://www.mycareersfuture.gov.sg/search?search=${encodeURIComponent(query + ' ' + location)}&sortBy=last_posted&page=0`,
+  };
+  return { type: 'job_scan', jobs, portalLinks };
 }
 
 /** Mock: application status for the user. */
@@ -526,10 +885,25 @@ function inferToolParams(userMessage, toolName) {
   return params;
 }
 
-/** Run a tool by name and return agentUpdate for frontend. */
-function runTool(name) {
+/** Run a tool by name and return agentUpdate for frontend. Supports async tools. options.getPortalCredentials = async () => ({ jobstreet? }). */
+async function runTool(name, params = {}, onStatusUpdate = null, options = {}) {
   switch (name) {
-    case 'scan_job_offers': return runScanJobOffers();
+    case 'web_search_jobs':
+    case 'scan_job_offers': {
+      const query = params.query || params.role || 'software engineer';
+      const location = params.location || 'Singapore';
+      const portalLinks = {
+        jobstreet: `https://www.jobstreet.com.sg/en/job-search/job-vacancy.php?key=${encodeURIComponent(query)}&location=${encodeURIComponent(location)}`,
+        mycareersfuture: `https://www.mycareersfuture.gov.sg/search?search=${encodeURIComponent(query + ' ' + location)}&sortBy=last_posted&page=0`,
+      };
+      const creds = typeof options.getPortalCredentials === 'function' ? await Promise.resolve(options.getPortalCredentials()).catch(() => ({})) : {};
+      if (creds.jobstreet?.email && creds.jobstreet?.password) {
+        const portalResult = await runPlaywrightPortalSearch('jobstreet', query, location, creds.jobstreet, onStatusUpdate);
+        if (portalResult) return portalResult;
+      }
+      if (onStatusUpdate) onStatusUpdate({ type: 'tool_call', agent: 'JobStreet', message: 'Log in to JobStreet below to search (you stay in this app).', status: 'done' });
+      return { type: 'job_scan', jobs: null, needsPortalLogin: 'jobstreet', portalLinks };
+    }
     case 'get_application_status': return runGetApplicationStatus();
     case 'suggest_profile_improvements': return runSuggestProfileImprovements();
     default: return null;
@@ -588,10 +962,46 @@ function buildUserProfileContext(extractedProfileJson, resumeText) {
   return '';
 }
 
-/** Call Gemini API with system prompt and conversation history.
- * @returns {Promise<null|{ reply: string|null, errorCode?: 'quota'|'invalid' }>} reply text, or null/error object on failure
+/** Gemini function definitions for MCP-style tool calling. */
+const GEMINI_TOOLS = [
+  {
+    functionDeclarations: [
+      {
+        name: 'web_search_jobs',
+        description: 'Search the web for real job listings. Use this when the user wants to find jobs.',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Job title or keywords (e.g. "Software Engineer", "Data Analyst", "Marketing Manager")',
+            },
+            location: {
+              type: 'string',
+              description: 'Location for the job search (e.g. "Singapore", "Remote", "London")',
+            },
+          },
+          required: ['query'],
+        },
+      },
+      {
+        name: 'get_application_status',
+        description: 'Get the user\'s application status: total applications, in progress, interviews scheduled.',
+        parameters: { type: 'object', properties: {} },
+      },
+      {
+        name: 'suggest_profile_improvements',
+        description: 'Suggest improvements to the user\'s resume or profile based on their current information.',
+        parameters: { type: 'object', properties: {} },
+      },
+    ],
+  },
+];
+
+/** Call Gemini API with system prompt and conversation history. Supports function calling.
+ * @returns {Promise<null|{ reply: string|null, functionCalls?: Array, errorCode?: 'quota'|'invalid' }>}
  */
-async function getGeminiReply(contents, apiKey, userProfileContext = '') {
+async function getGeminiReply(contents, apiKey, userProfileContext = '', tools = null) {
   if (!apiKey || !apiKey.trim()) return null;
   const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
@@ -600,6 +1010,9 @@ async function getGeminiReply(contents, apiKey, userProfileContext = '') {
     systemInstruction: { parts: [{ text: systemText }] },
     contents: contents.map((c) => ({ role: c.role, parts: c.parts })),
   };
+  if (tools !== null) {
+    body.tools = tools || GEMINI_TOOLS;
+  }
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -629,7 +1042,28 @@ async function getGeminiReply(contents, apiKey, userProfileContext = '') {
   } catch {
     return { reply: null, errorCode: 'invalid' };
   }
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  const candidate = data?.candidates?.[0];
+  if (!candidate) return { reply: null, errorCode: 'invalid' };
+  
+  // Check for function calls
+  const functionCalls = [];
+  const parts = candidate.content?.parts || [];
+  for (const part of parts) {
+    if (part.functionCall) {
+      functionCalls.push({
+        name: part.functionCall.name,
+        args: part.functionCall.args || {},
+      });
+    }
+  }
+  
+  // Get text reply
+  const textPart = parts.find((p) => p.text);
+  const text = textPart?.text;
+  
+  if (functionCalls.length > 0) {
+    return { reply: text?.trim() || null, functionCalls };
+  }
   if (typeof text === 'string' && text.trim()) {
     return { reply: text.trim() };
   }
@@ -744,65 +1178,156 @@ app.post('/api/chat', async (req, res) => {
   }
   console.log('[CHAT] provider:', provider, 'message from frontend: "%s"', message.trim().slice(0, 200));
 
-  const agentUpdates = [];
-  let toolCall = null;
-  let toolResultText = '';
-  const toolName = getToolToRun(message);
-  if (toolName) {
-    toolCall = { name: toolName, params: inferToolParams(message, toolName) };
-    recordBackendActivity(req, { source: 'chat', type: 'tool_call', message: `Running tool: ${toolName}` });
-    const update = runTool(toolName);
-    if (update) {
-      agentUpdates.push(update);
-      if (update.type === 'job_scan' && update.jobs) {
-        toolResultText = 'Job scan results:\n' + update.jobs.map((j) => `- ${j.title} at ${j.company} (${j.location}) – match ${j.match}`).join('\n');
-      } else if (update.type === 'application_status') {
-        toolResultText = `Application status: ${update.total} total, ${update.inProgress} in progress, ${update.interviews} interviews. Recent: ${(update.recent || []).join('; ')}`;
-      } else if (update.type === 'profile_improvements' && update.suggestions) {
-        toolResultText = 'Profile improvement suggestions:\n' + update.suggestions.map((s, i) => `${i + 1}. ${s}`).join('\n');
-      }
-    }
-  }
+  // Collect status updates for frontend (like Cursor agent)
+  const statusUpdates = [];
+  const addStatusUpdate = (update) => {
+    statusUpdates.push({
+      id: String(statusUpdates.length + 1),
+      type: update.type || 'agent_step',
+      agent: update.agent,
+      message: update.message,
+      status: update.status || 'done',
+      timestamp: new Date().toISOString(),
+    });
+  };
 
-  const contents = buildGeminiContents(history, message.trim(), toolResultText);
+  addStatusUpdate({ type: 'planning', agent: 'Agent', message: 'Analyzing request...', status: 'running' });
+
   let userProfileContext = '';
   if (hasClerk && getAuth(req)?.userId) {
     const resumeRow = db.prepare('SELECT extracted_profile, resume_text FROM user_resume WHERE user_id = ?').get(getAuth(req).userId);
     if (resumeRow && (resumeRow.resume_text || resumeRow.extracted_profile)) {
       userProfileContext = buildUserProfileContext(resumeRow.extracted_profile, resumeRow.resume_text);
     }
-    // PLACEHOLDER (teammate): Load user links from user_links table, extract info from each URL (e.g. LinkedIn, portfolio),
-    // and append to userProfileContext so the agent can use it as a data resource. No implementation yet.
   }
+
+  let contents = buildGeminiContents(history, message.trim(), '');
+  const agentUpdates = [];
+  let toolCall = null;
   let reply = 'No response';
+  const maxIterations = 5; // Prevent infinite loops
+  let iteration = 0;
+  const userId = hasClerk && typeof getAuth === 'function' && getAuth(req)?.userId ? getAuth(req).userId : null;
+  const getPortalCredentials = userId ? () => getPortalCredentialsForUser(userId) : () => ({});
+
   if (!apiKey || !apiKey.trim()) {
     reply = "I couldn't generate a response. Please add your API key in Settings (sidebar → Settings) for the selected provider (Gemini or DeepSeek) and try again.";
-    console.log('[CHAT] No API key – user should set key in Settings or send apiKey');
+    console.log('[CHAT] No API key');
   } else {
-    const result =
-      provider === 'deepseek'
-        ? await getDeepSeekReply(contents, apiKey, userProfileContext)
-        : await getGeminiReply(contents, apiKey, userProfileContext);
-    if (result && typeof result.reply === 'string') {
-      reply = stripMarkdown(result.reply);
-    } else if (result && result.errorCode === 'quota') {
-      reply =
+    // MCP-style iterative function calling (only for Gemini)
+    while (iteration < maxIterations) {
+      iteration++;
+      addStatusUpdate({ type: 'agent_step', agent: 'Agent', message: `Calling ${provider} API...`, status: 'running' });
+
+      const result =
         provider === 'deepseek'
-          ? "I couldn't generate a response. You've hit the DeepSeek API rate limit or quota. Try again in a minute or check your plan."
-          : "I couldn't generate a response. You've hit the Gemini API rate limit or quota. Check your plan and billing at https://ai.google.dev/gemini-api/docs/rate-limits or try again in a minute.";
-      console.log('[CHAT]', provider, 'quota exceeded');
-    } else {
-      reply =
-        "I couldn't generate a response. Your API key may be invalid or expired—check Settings and try again. If it was working before, the key might need to be re-entered.";
-      console.log('[CHAT]', provider, 'returned no reply (API error or invalid key)');
+          ? await getDeepSeekReply(contents, apiKey, userProfileContext)
+          : await getGeminiReply(contents, apiKey, userProfileContext, iteration === 1 ? GEMINI_TOOLS : null);
+
+      if (result && result.errorCode) {
+        if (result.errorCode === 'quota') {
+          reply =
+            provider === 'deepseek'
+              ? "I couldn't generate a response. You've hit the DeepSeek API rate limit or quota. Try again in a minute or check your plan."
+              : "I couldn't generate a response. You've hit the Gemini API rate limit or quota. Check your plan and billing at https://ai.google.dev/gemini-api/docs/rate-limits or try again in a minute.";
+        } else {
+          reply = "I couldn't generate a response. Your API key may be invalid or expired—check Settings and try again.";
+        }
+        break;
+      }
+
+      // Handle function calls (MCP-style)
+      if (result && result.functionCalls && result.functionCalls.length > 0 && provider === 'gemini') {
+        for (const fnCall of result.functionCalls) {
+          const toolName = fnCall.name;
+          const params = fnCall.args || {};
+          toolCall = { name: toolName, params };
+          addStatusUpdate({ type: 'tool_call', agent: 'Tool', message: `Calling ${toolName}...`, status: 'running' });
+          recordBackendActivity(req, { source: 'chat', type: 'tool_call', message: `Running tool: ${toolName}` });
+
+          const onToolStatus = (update) => {
+            addStatusUpdate(update);
+          };
+
+          const toolResult = await runTool(toolName, params, onToolStatus, { getPortalCredentials });
+          if (toolResult) {
+            agentUpdates.push(toolResult);
+            let toolResultText = '';
+            if (toolResult.type === 'job_scan') {
+              if (toolResult.needsPortalLogin === 'jobstreet') {
+                toolResultText = 'The user must log in to JobStreet in the card shown in the app (they stay in the app, no redirect). Ask them to enter their JobStreet email and password in the card, then click "Log in to JobStreet". After they log in, they can click "Search jobs now" to run the search.';
+              } else if (toolResult.jobs && toolResult.jobs.length > 0) {
+                toolResultText = 'Job search results:\n' + toolResult.jobs.map((j) => `- ${j.title} at ${j.company} (${j.location}) – match ${j.match}`).join('\n');
+              } else {
+                toolResultText = 'No job listings found in the search results. Please try a different search query or location.';
+              }
+            } else if (toolResult.type === 'application_status') {
+              toolResultText = `Application status: ${toolResult.total} total, ${toolResult.inProgress} in progress, ${toolResult.interviews} interviews. Recent: ${(toolResult.recent || []).join('; ')}`;
+            } else if (toolResult.type === 'profile_improvements' && toolResult.suggestions) {
+              toolResultText = 'Profile improvement suggestions:\n' + toolResult.suggestions.map((s, i) => `${i + 1}. ${s}`).join('\n');
+            }
+
+            // Add tool result to conversation for next LLM call
+            contents.push({
+              role: 'model',
+              parts: [{ text: `[Function call: ${toolName}]` }],
+            });
+            contents.push({
+              role: 'user',
+              parts: [{ text: `Tool result: ${toolResultText}` }],
+            });
+          }
+        }
+        // Continue loop to get final reply after tool execution
+        continue;
+      }
+
+      // Final reply received
+      if (result && typeof result.reply === 'string' && result.reply.trim()) {
+        reply = stripMarkdown(result.reply);
+        addStatusUpdate({ type: 'done', agent: 'Agent', message: 'Reply generated', status: 'done' });
+        break;
+      }
+    }
+
+    // Fallback: if no function calling, use keyword-based tool detection (for DeepSeek or when function calling fails)
+    if (reply === 'No response' && provider === 'deepseek') {
+      const toolName = getToolToRun(message);
+      if (toolName) {
+        toolCall = { name: toolName, params: inferToolParams(message, toolName) };
+        addStatusUpdate({ type: 'tool_call', agent: 'Tool', message: `Calling ${toolName}...`, status: 'running' });
+        const update = await runTool(toolName, toolCall.params, (s) => addStatusUpdate(s), { getPortalCredentials });
+        if (update) {
+          agentUpdates.push(update);
+          const toolResultText = update.type === 'job_scan'
+            ? (update.needsPortalLogin === 'jobstreet'
+                ? 'User must log in to JobStreet in the card (they stay in the app). Ask them to log in in the card, then click Search jobs now.'
+                : update.jobs && update.jobs.length > 0
+                  ? 'Job scan results:\n' + update.jobs.map((j) => `- ${j.title} at ${j.company} (${j.location}) – match ${j.match}`).join('\n')
+                  : 'No job listings found in the search results.')
+            : '';
+          contents = buildGeminiContents(history, message.trim(), toolResultText);
+          const result = await getDeepSeekReply(contents, apiKey, userProfileContext);
+          if (result && typeof result.reply === 'string') {
+            reply = stripMarkdown(result.reply);
+          }
+        }
+      } else {
+        const result = await getDeepSeekReply(contents, apiKey, userProfileContext);
+        if (result && typeof result.reply === 'string') {
+          reply = stripMarkdown(result.reply);
+        }
+      }
     }
   }
+
   recordBackendActivity(req, { source: 'chat', type: 'done', message: 'Reply sent to frontend' });
-  console.log('[CHAT] >>> Sending reply + %d agentUpdate(s) to frontend\n', agentUpdates.length);
+  console.log('[CHAT] >>> Sending reply + %d agentUpdate(s) + %d statusUpdate(s)\n', agentUpdates.length, statusUpdates.length);
   return res.json({
     reply,
     agentUpdates: agentUpdates.length ? agentUpdates : undefined,
     toolCall: toolCall || undefined,
+    statusUpdates: statusUpdates.length > 0 ? statusUpdates : undefined, // Cursor-like status stream
   });
 });
 
