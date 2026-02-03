@@ -2,8 +2,8 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
 const multer = require('multer');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
@@ -798,19 +798,45 @@ if (hasClerk) {
   app.post('/api/user/portal-google-login', respondClerkMissing);
 }
 
-/** JobAI agent system prompt: persona + tools (results injected by backend). No markdown—frontend shows plain text only. */
-const JOBAI_SYSTEM_PROMPT = `You are jobAI, a friendly assistant that helps users land their next job offer.
+function readPromptFile(fileName, fallback) {
+  try {
+    const promptPath = path.join(__dirname, 'prompts', fileName);
+    const raw = fs.readFileSync(promptPath, 'utf8');
+    const cleaned = raw.replace(/\r\n/g, '\n').trim();
+    return cleaned || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Exam question drafting system prompt: persona. No markdown—frontend shows plain text only. */
+const JOBAI_SYSTEM_PROMPT = readPromptFile(
+  'system.txt',
+  `You are an exam question drafting assistant. Your job is to generate clear, well-structured exam questions for a given subject, topic, and difficulty.
 
 IMPORTANT: Use plain text only. Do not use markdown: no asterisks for bold (**text**), no bullet asterisks (*), no hashtags for headers. Write in clear, readable sentences. The chat UI cannot render markdown.
 
-Your tools (use function calling to invoke them):
-- web_search_jobs: Search the web for real job listings. Parameters: query (job title/keywords), location (e.g. "Singapore", "Remote"). Returns a list of jobs with title, company, location, and link.
-- get_application_status: Summarize the user's applications and follow-ups.
-- suggest_profile_improvements: Suggest resume or profile improvements.
+When the user asks for questions:
+- Ask one brief clarifying question if the topic, level, or question type is missing.
+- Otherwise generate a concise set of questions in plain text.
+- Prefer numbered questions, one per line, and include the question type if relevant (e.g. Multiple Choice, Short Answer, Essay).
 
-When the user wants to find jobs, use the web_search_jobs function to search for real job listings. Extract job title/keywords and location from the user's message or their resume profile.
+Keep answers concise and helpful.`
+);
 
-Keep answers concise and encouraging. When you receive tool results, present them clearly in plain text (list jobs with title, company, and location). Never invent job titles or companies—only use data from the tool results.`;
+/** Format-guard prompt: normalize output into a clean question list. */
+const QUESTION_FORMAT_GUARD_PROMPT = readPromptFile(
+  'format_guard.txt',
+  `You are a format-guard agent. You only format and clean the assistant's output.
+
+Rules:
+- Output plain text only. No markdown, no bullet symbols, no headers.
+- Return only the questions, one per line.
+- Each line must start with a number and a period (e.g. "1. ...").
+- If a question is missing a question mark, add one.
+- Remove any preambles, explanations, or extra text.
+- Keep the original meaning of each question.`
+);
 
 /** Get decrypted portal credentials for a user (for Playwright auto-search). Returns { jobstreet?: { email, password }, mycareersfuture?: { email, password } }. */
 function getPortalCredentialsForUser(userId) {
@@ -1219,7 +1245,11 @@ async function runTool(name, params = {}, onStatusUpdate = null, options = {}) {
 /** Build Gemini contents from chat history (messages from frontend: { role, content }[]). */
 function buildGeminiContents(messages, currentMessage, toolResultText) {
   const parts = [];
-  for (const m of messages || []) {
+  const history = Array.isArray(messages) ? messages : [];
+  const legacyPersonaRegex = /\b(jobai|job search|job listings|application status|resume)\b/i;
+  const hasLegacyPersona = history.some((m) => typeof m?.content === 'string' && legacyPersonaRegex.test(m.content));
+  const sanitizedHistory = hasLegacyPersona ? [] : history;
+  for (const m of sanitizedHistory) {
     const role = m.role === 'user' ? 'user' : 'model';
     const text = typeof m.content === 'string' ? m.content : '';
     if (!text.trim()) continue;
@@ -1376,6 +1406,39 @@ async function getGeminiReply(contents, apiKey, userProfileContext = '', tools =
   return { reply: null, errorCode: 'invalid' };
 }
 
+/** Call Gemini API with a custom system prompt (no tools). */
+async function getGeminiReplyWithSystemPrompt(contents, apiKey, systemText) {
+  if (!apiKey || !apiKey.trim()) return null;
+  const model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
+  const body = {
+    systemInstruction: { parts: [{ text: systemText }] },
+    contents: contents.map((c) => ({ role: c.role, parts: c.parts })),
+  };
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const errText = await res.text();
+  if (!res.ok) return null;
+  let data;
+  try {
+    data = JSON.parse(errText);
+  } catch {
+    return null;
+  }
+  const candidate = data?.candidates?.[0];
+  if (!candidate) return null;
+  const parts = candidate.content?.parts || [];
+  const textPart = parts.find((p) => p.text);
+  const text = textPart?.text;
+  if (typeof text === 'string' && text.trim()) {
+    return { reply: text.trim() };
+  }
+  return null;
+}
+
 /** Call DeepSeek API (OpenAI-compatible). contents = array of { role, parts: [{ text }] }; userProfileContext = system prompt suffix.
  * @returns {Promise<null|{ reply: string|null, errorCode?: 'quota'|'invalid' }>}
  */
@@ -1427,6 +1490,34 @@ async function getDeepSeekReply(contents, apiKey, userProfileContext = '') {
     return { reply: text.trim() };
   }
   return { reply: null, errorCode: 'invalid' };
+}
+
+/** Call DeepSeek API with a custom system prompt. */
+async function getDeepSeekReplyWithSystemPrompt(contents, apiKey, systemText) {
+  if (!apiKey || !apiKey.trim()) return null;
+  const messages = [{ role: 'system', content: systemText }];
+  for (const c of contents || []) {
+    const role = c.role === 'model' ? 'assistant' : 'user';
+    const text = c.parts?.[0]?.text;
+    if (typeof text === 'string' && text.trim()) {
+      messages.push({ role, content: text.trim() });
+    }
+  }
+  const url = 'https://api.deepseek.com/v1/chat/completions';
+  const body = { model: process.env.DEEPSEEK_MODEL || 'deepseek-chat', messages };
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey.trim()}`,
+    },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) return null;
+  const text = json?.choices?.[0]?.message?.content;
+  if (typeof text === 'string' && text.trim()) return { reply: text.trim() };
+  return null;
 }
 
 /** Strip common markdown so the frontend (plain text) does not show ** or *. */
@@ -1624,6 +1715,21 @@ app.post('/api/chat', async (req, res) => {
           reply = stripMarkdown(result.reply);
         }
       }
+    }
+  }
+
+  if (reply && reply !== 'No response') {
+    addStatusUpdate({ type: 'agent_step', agent: 'Format Guard', message: 'Normalizing question format...', status: 'running' });
+    const guardContents = [{ role: 'user', parts: [{ text: reply }] }];
+    const formatted =
+      provider === 'deepseek'
+        ? await getDeepSeekReplyWithSystemPrompt(guardContents, apiKey, QUESTION_FORMAT_GUARD_PROMPT)
+        : await getGeminiReplyWithSystemPrompt(guardContents, apiKey, QUESTION_FORMAT_GUARD_PROMPT);
+    if (formatted && typeof formatted.reply === 'string' && formatted.reply.trim()) {
+      reply = stripMarkdown(formatted.reply);
+      addStatusUpdate({ type: 'done', agent: 'Format Guard', message: 'Questions formatted', status: 'done' });
+    } else {
+      addStatusUpdate({ type: 'done', agent: 'Format Guard', message: 'Format guard skipped', status: 'done' });
     }
   }
 
