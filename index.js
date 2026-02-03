@@ -4,6 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const PDFDocument = require('pdfkit');
 const multer = require('multer');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
@@ -26,6 +27,13 @@ const googleScopes = (process.env.GMAIL_OAUTH_SCOPES || 'https://www.googleapis.
 const jobStreetGoogleLoginUrl = (process.env.JOBSTREET_GOOGLE_LOGIN_URL || 'https://www.jobstreet.com.sg/en/login').trim();
 const pendingGoogleOAuthStates = new Map();
 const GOOGLE_STATE_TTL_MS = 10 * 60 * 1000;
+
+const GENERATED_PAPERS_DIR = path.join(__dirname, 'generated_papers');
+try {
+  if (!fs.existsSync(GENERATED_PAPERS_DIR)) fs.mkdirSync(GENERATED_PAPERS_DIR, { recursive: true });
+} catch {
+  // ignore
+}
 
 function isGoogleOAuthConfigured() {
   return !!(googleClientId && googleClientSecret && googleRedirectUri && hasEncryptionSecret());
@@ -476,6 +484,7 @@ function recordBackendActivity(reqOrUserId, { source, type, message, payload }) 
 
 app.use(cors({ origin: true }));
 app.use(express.json());
+app.use('/generated_papers', express.static(GENERATED_PAPERS_DIR));
 
 /** Request logging – log as soon as request hits, then again when response is sent */
 app.use((req, res, next) => {
@@ -806,6 +815,55 @@ function readPromptFile(fileName, fallback) {
     return cleaned || fallback;
   } catch {
     return fallback;
+  }
+}
+
+function parseStyleUpdate(message) {
+  if (typeof message !== 'string') return null;
+  const text = message.toLowerCase();
+  if (!/(font|text).*(size|bigger|smaller|larger)|increase.*font|decrease.*font/.test(text)) return null;
+  if (/(bigger|larger|increase)/.test(text)) return { fontSizeDelta: 2 };
+  if (/(smaller|decrease|reduce)/.test(text)) return { fontSizeDelta: -2 };
+  return null;
+}
+
+function buildQuestionList(formattedText, userMessage) {
+  if (typeof formattedText !== 'string') return null;
+  const lines = formattedText
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .filter((l) => /^\d+\.\s+/.test(l));
+  if (lines.length === 0) return null;
+  const wantsSingle = typeof userMessage === 'string' && /\b(single|one)\s+(question|q)\b/i.test(userMessage);
+  if (lines.length === 1 && !wantsSingle) return null;
+  return lines.map((l) => l.replace(/^\d+\.\s+/, '').trim()).filter(Boolean);
+}
+
+function generatePdfFromQuestions(questions, opts = {}) {
+  if (!Array.isArray(questions) || questions.length === 0) return null;
+  const title = typeof opts.title === 'string' && opts.title.trim() ? opts.title.trim() : 'Generated Question Sheet';
+  const now = new Date();
+  const fileName = `paper_${now.getTime()}.pdf`;
+  const filePath = path.join(GENERATED_PAPERS_DIR, fileName);
+  try {
+    const doc = new PDFDocument({ size: 'A4', margin: 54 });
+    const stream = fs.createWriteStream(filePath);
+    doc.pipe(stream);
+    doc.fontSize(16).text(title, { align: 'center' });
+    doc.moveDown(0.5);
+    doc.fontSize(10).fillColor('#666666').text(`Generated ${now.toLocaleString()}`, { align: 'center' });
+    doc.moveDown(1);
+    doc.fillColor('#111111');
+    doc.fontSize(12);
+    questions.forEach((q, idx) => {
+      doc.text(`${idx + 1}. ${q}`, { align: 'left' });
+      doc.moveDown(0.5);
+    });
+    doc.end();
+    return { fileName, filePath };
+  } catch {
+    return null;
   }
 }
 
@@ -1718,6 +1776,9 @@ app.post('/api/chat', async (req, res) => {
     }
   }
 
+  let questionList = null;
+  let pdfUrl = null;
+  const styleUpdate = parseStyleUpdate(message);
   if (reply && reply !== 'No response') {
     addStatusUpdate({ type: 'agent_step', agent: 'Format Guard', message: 'Normalizing question format...', status: 'running' });
     const guardContents = [{ role: 'user', parts: [{ text: reply }] }];
@@ -1727,9 +1788,18 @@ app.post('/api/chat', async (req, res) => {
         : await getGeminiReplyWithSystemPrompt(guardContents, apiKey, QUESTION_FORMAT_GUARD_PROMPT);
     if (formatted && typeof formatted.reply === 'string' && formatted.reply.trim()) {
       reply = stripMarkdown(formatted.reply);
+      questionList = buildQuestionList(reply, message);
       addStatusUpdate({ type: 'done', agent: 'Format Guard', message: 'Questions formatted', status: 'done' });
     } else {
       addStatusUpdate({ type: 'done', agent: 'Format Guard', message: 'Format guard skipped', status: 'done' });
+    }
+  }
+
+  if (Array.isArray(questionList) && questionList.length > 0) {
+    const pdfResult = generatePdfFromQuestions(questionList, { title: 'Generated Question Sheet' });
+    if (pdfResult) {
+      const baseUrl = `${req.protocol}://${req.get('host')}`;
+      pdfUrl = `${baseUrl}/generated_papers/${pdfResult.fileName}`;
     }
   }
 
@@ -1740,6 +1810,9 @@ app.post('/api/chat', async (req, res) => {
     agentUpdates: agentUpdates.length ? agentUpdates : undefined,
     toolCall: toolCall || undefined,
     statusUpdates: statusUpdates.length > 0 ? statusUpdates : undefined, // Cursor-like status stream
+    questionList: questionList || undefined,
+    styleUpdate: styleUpdate || undefined,
+    pdfUrl: pdfUrl || undefined,
   });
 });
 

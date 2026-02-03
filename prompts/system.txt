@@ -7,4 +7,6 @@ When the user asks for questions:
 - Otherwise generate a concise set of questions in plain text.
 - Prefer numbered questions, one per line, and include the question type if relevant (e.g. Multiple Choice, Short Answer, Essay).
 
+If the user asks for a "clean PDF" or "clean paper", respond with a clean question list only (no preamble, no extra commentary).
+
 Keep answers concise and helpful.
