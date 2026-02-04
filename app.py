@@ -62,7 +62,8 @@ def init_db() -> None:
         """
         CREATE TABLE IF NOT EXISTS user_llm_preference (
           user_id TEXT PRIMARY KEY,
-          provider TEXT
+          provider TEXT,
+          updated_at TEXT
         )
         """
     )
@@ -83,6 +84,17 @@ def init_db() -> None:
         )
         """
     )
+    ensure_column(conn, "user_gemini_keys", "api_key", "TEXT")
+    ensure_column(conn, "user_deepseek_keys", "api_key", "TEXT")
+    ensure_column(conn, "user_llm_preference", "provider", "TEXT")
+    ensure_column(conn, "user_llm_preference", "updated_at", "TEXT")
+    ensure_column(conn, "user_chat", "updated_at", "TEXT")
+    ensure_column(conn, "user_links", "links", "TEXT")
+    now = datetime.utcnow().isoformat()
+    try:
+        conn.execute("UPDATE user_llm_preference SET updated_at = ? WHERE updated_at IS NULL", (now,))
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -94,6 +106,16 @@ def read_prompt_file(file_name: str, fallback: str) -> str:
         return cleaned or fallback
     except Exception:
         return fallback
+
+
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, col_def: str) -> None:
+    try:
+        cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if any(row["name"] == column for row in cols):
+            return
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
+    except Exception:
+        return
 
 
 SYSTEM_PROMPT = read_prompt_file(
@@ -384,9 +406,11 @@ def put_llm_provider(request: Request, body: Dict[str, Any]):
     if provider not in ("gemini", "deepseek"):
         provider = "gemini"
     conn = get_db()
+    now = datetime.utcnow().isoformat()
     conn.execute(
-        "INSERT INTO user_llm_preference (user_id, provider) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET provider = ?",
-        (user_id, provider, provider),
+        "INSERT INTO user_llm_preference (user_id, provider, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET provider = ?, updated_at = ?",
+        (user_id, provider, now, provider, now),
     )
     conn.commit()
     conn.close()
