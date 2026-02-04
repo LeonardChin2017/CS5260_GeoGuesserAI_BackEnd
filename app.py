@@ -118,6 +118,14 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, col_def: st
         return
 
 
+def get_table_columns(conn: sqlite3.Connection, table: str) -> List[str]:
+    try:
+        cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return [row["name"] for row in cols]
+    except Exception:
+        return []
+
+
 SYSTEM_PROMPT = read_prompt_file(
     "system.txt",
     "You are an exam question drafting assistant. Generate exam questions in plain text.",
@@ -324,9 +332,23 @@ def chat(req: ChatRequest, request: Request):
 def get_gemini_key(request: Request):
     user_id = get_user_id(request)
     conn = get_db()
-    row = conn.execute("SELECT api_key FROM user_gemini_keys WHERE user_id = ?", (user_id,)).fetchone()
+    columns = set(get_table_columns(conn, "user_gemini_keys"))
+    if "api_key" in columns:
+        row = conn.execute(
+            "SELECT api_key FROM user_gemini_keys WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        value = row["api_key"] if row else None
+    elif "encrypted_key" in columns:
+        row = conn.execute(
+            "SELECT encrypted_key FROM user_gemini_keys WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        value = row["encrypted_key"] if row else None
+    else:
+        value = None
     conn.close()
-    return {"hasKey": bool(row and row["api_key"])}
+    return {"hasKey": bool(value)}
 
 
 @app.put("/api/user/gemini-key")
@@ -336,10 +358,28 @@ def put_gemini_key(request: Request, body: Dict[str, Any]):
     if not api_key:
         raise HTTPException(status_code=400, detail="apiKey required")
     conn = get_db()
-    conn.execute(
-        "INSERT INTO user_gemini_keys (user_id, api_key) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET api_key = ?",
-        (user_id, api_key, api_key),
-    )
+    columns = set(get_table_columns(conn, "user_gemini_keys"))
+    if "encrypted_key" in columns and "api_key" in columns:
+        conn.execute(
+            "INSERT INTO user_gemini_keys (user_id, api_key, encrypted_key) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET api_key = ?, encrypted_key = ?",
+            (user_id, api_key, api_key, api_key, api_key),
+        )
+    elif "encrypted_key" in columns:
+        conn.execute(
+            "INSERT INTO user_gemini_keys (user_id, encrypted_key) "
+            "VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET encrypted_key = ?",
+            (user_id, api_key, api_key),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO user_gemini_keys (user_id, api_key) "
+            "VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET api_key = ?",
+            (user_id, api_key, api_key),
+        )
     conn.commit()
     conn.close()
     return {"ok": True}
