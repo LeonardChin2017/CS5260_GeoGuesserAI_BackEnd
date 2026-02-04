@@ -98,12 +98,22 @@ def read_prompt_file(file_name: str, fallback: str) -> str:
 
 SYSTEM_PROMPT = read_prompt_file(
     "system.txt",
-    "You are an exam question drafting assistant. Generate exam questions in plain text.",
+    "You are an adaptive coding tutor. Generate coding problems, plans, hints, and feedback in plain text.",
 )
 
 FORMAT_GUARD_PROMPT = read_prompt_file(
     "format_guard.txt",
-    "Return only questions, one per line, numbered 1., 2., 3.",
+    "Return plain text. If problems are present, list them as numbered lines.",
+)
+
+CODE_GEN_SYSTEM_PROMPT = read_prompt_file(
+    "code_gen.txt",
+    "You are a coding tutor. Generate starter code only, no explanations or markdown.",
+)
+
+CODE_EVAL_SYSTEM_PROMPT = read_prompt_file(
+    "code_eval.txt",
+    "You are a coding reviewer. Provide concise feedback in plain text with sections: Evaluation notes, Hints, Improvements.",
 )
 
 
@@ -138,6 +148,60 @@ def build_question_list(formatted_text: str, user_message: str) -> Optional[List
     if len(numbered) == 1 and not wants_single:
         return None
     return [re.sub(r"^\d+\.\s+", "", l).strip() for l in numbered if l.strip()]
+
+
+def build_status_updates() -> List[Dict[str, Any]]:
+    now = datetime.utcnow().isoformat()
+    return [
+        {
+            "id": "planner",
+            "agent": "Planner Agent",
+            "message": "Updated learner profile and next goals",
+            "status": "done",
+            "type": "planning",
+            "timestamp": now,
+        },
+        {
+            "id": "question-maker",
+            "agent": "Question Maker Agent",
+            "message": "Drafted adaptive coding problems",
+            "status": "done",
+            "type": "agent_step",
+            "timestamp": now,
+        },
+        {
+            "id": "test-case",
+            "agent": "Test Case Generator Agent",
+            "message": "Prepared edge cases and test inputs",
+            "status": "done",
+            "type": "agent_step",
+            "timestamp": now,
+        },
+        {
+            "id": "judge",
+            "agent": "Implementation Judge Agent",
+            "message": "Outlined evaluation criteria",
+            "status": "done",
+            "type": "agent_step",
+            "timestamp": now,
+        },
+        {
+            "id": "tutor",
+            "agent": "Tutoring Agent",
+            "message": "Generated progressive hints",
+            "status": "done",
+            "type": "done",
+            "timestamp": now,
+        },
+    ]
+
+
+def resolve_api_key(provider: str, provided_key: Optional[str]) -> str:
+    api_key = (provided_key or "").strip()
+    if api_key:
+        return api_key
+    env_key = "DEEPSEEK_API_KEY" if provider == "deepseek" else "GEMINI_API_KEY"
+    return os.getenv(env_key, "").strip()
 
 
 def generate_pdf(questions: List[str], title: str = "Generated Question Sheet") -> Optional[str]:
@@ -216,6 +280,21 @@ class ChatRequest(BaseModel):
     llmProvider: Optional[str] = None
 
 
+class CodeGenRequest(BaseModel):
+    goal: str
+    language: str
+    apiKey: Optional[str] = None
+    llmProvider: Optional[str] = None
+
+
+class CodeEvalRequest(BaseModel):
+    code: str
+    language: str
+    goal: Optional[str] = None
+    apiKey: Optional[str] = None
+    llmProvider: Optional[str] = None
+
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -229,7 +308,7 @@ app.mount("/generated_papers", StaticFiles(directory=GENERATED_PAPERS_DIR), name
 
 @app.get("/")
 def root():
-    return {"service": "jobai-backend", "message": "API only. Try GET /health or POST /api/chat."}
+    return {"service": "adaptive-coding-backend", "message": "API only. Try GET /health or POST /api/chat."}
 
 
 @app.get("/health")
@@ -246,9 +325,7 @@ def chat(req: ChatRequest, request: Request):
     history = req.messages or []
     provider = "deepseek" if (req.llmProvider or "").lower() == "deepseek" else "gemini"
 
-    api_key = (req.apiKey or "").strip()
-    if not api_key:
-        api_key = os.getenv("DEEPSEEK_API_KEY" if provider == "deepseek" else "GEMINI_API_KEY", "").strip()
+    api_key = resolve_api_key(provider, req.apiKey)
 
     if not api_key:
         return JSONResponse(
@@ -295,7 +372,69 @@ def chat(req: ChatRequest, request: Request):
         "questionList": question_list,
         "styleUpdate": style_update,
         "pdfUrl": pdf_url,
+        "statusUpdates": build_status_updates(),
     }
+
+
+@app.post("/api/code/generate")
+def generate_code(req: CodeGenRequest):
+    goal = (req.goal or "").strip()
+    language = (req.language or "").strip()
+    if not goal or not language:
+        raise HTTPException(status_code=400, detail="goal and language required")
+
+    provider = "deepseek" if (req.llmProvider or "").lower() == "deepseek" else "gemini"
+    api_key = resolve_api_key(provider, req.apiKey)
+    if not api_key:
+        return JSONResponse(
+            status_code=200,
+            content={"code": "", "error": "Missing API key. Add it in Settings and try again."},
+        )
+
+    user_text = (
+        f"Generate starter code only.\n"
+        f"Language: {language}\n"
+        f"Goal: {goal}\n"
+        "Constraints: keep it minimal, runnable, and educational. Return only code."
+    )
+    if provider == "deepseek":
+        code = call_deepseek([{"role": "user", "content": user_text}], api_key, CODE_GEN_SYSTEM_PROMPT)
+    else:
+        code = call_gemini([{"role": "user", "parts": [{"text": user_text}]}], api_key, CODE_GEN_SYSTEM_PROMPT)
+
+    return {"code": code or "", "statusUpdates": build_status_updates()}
+
+
+@app.post("/api/code/evaluate")
+def evaluate_code(req: CodeEvalRequest):
+    code = (req.code or "").strip()
+    language = (req.language or "").strip()
+    if not code or not language:
+        raise HTTPException(status_code=400, detail="code and language required")
+
+    provider = "deepseek" if (req.llmProvider or "").lower() == "deepseek" else "gemini"
+    api_key = resolve_api_key(provider, req.apiKey)
+    if not api_key:
+        return JSONResponse(
+            status_code=200,
+            content={"feedback": "", "error": "Missing API key. Add it in Settings and try again."},
+        )
+
+    goal = (req.goal or "").strip() or "Not specified"
+    user_text = (
+        f"Review the code and provide concise feedback in plain text.\n"
+        f"Language: {language}\n"
+        f"Goal: {goal}\n"
+        "Code:\n"
+        f"{code}\n\n"
+        "Include sections labeled exactly: Evaluation notes, Hints, Improvements."
+    )
+    if provider == "deepseek":
+        feedback = call_deepseek([{"role": "user", "content": user_text}], api_key, CODE_EVAL_SYSTEM_PROMPT)
+    else:
+        feedback = call_gemini([{"role": "user", "parts": [{"text": user_text}]}], api_key, CODE_EVAL_SYSTEM_PROMPT)
+
+    return {"feedback": feedback or "", "statusUpdates": build_status_updates()}
 
 
 @app.get("/api/user/gemini-key")
