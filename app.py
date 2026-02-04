@@ -145,6 +145,33 @@ def get_user_id(request: Request) -> str:
     return auth or "anonymous"
 
 
+def get_user_api_key(conn: sqlite3.Connection, user_id: str, provider: str) -> str:
+    try:
+        if provider == "deepseek":
+            row = conn.execute(
+                "SELECT api_key FROM user_deepseek_keys WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            return (row["api_key"] or "").strip() if row else ""
+        columns = set(get_table_columns(conn, "user_gemini_keys"))
+        if "api_key" in columns:
+            row = conn.execute(
+                "SELECT api_key FROM user_gemini_keys WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row and row["api_key"]:
+                return str(row["api_key"]).strip()
+        if "encrypted_key" in columns:
+            row = conn.execute(
+                "SELECT encrypted_key FROM user_gemini_keys WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            return (row["encrypted_key"] or "").strip() if row else ""
+    except Exception:
+        return ""
+    return ""
+
+
 def parse_style_update(message: str) -> Optional[Dict[str, int]]:
     text = message.lower()
     if not re.search(r"(font|text).*(size|bigger|smaller|larger)|increase.*font|decrease.*font", text):
@@ -278,6 +305,13 @@ def chat(req: ChatRequest, request: Request):
     provider = "deepseek" if (req.llmProvider or "").lower() == "deepseek" else "gemini"
 
     api_key = (req.apiKey or "").strip()
+    if not api_key:
+        try:
+            conn = get_db()
+            api_key = get_user_api_key(conn, get_user_id(request), provider)
+            conn.close()
+        except Exception:
+            api_key = ""
     if not api_key:
         api_key = os.getenv("DEEPSEEK_API_KEY" if provider == "deepseek" else "GEMINI_API_KEY", "").strip()
 
