@@ -464,14 +464,30 @@ def put_llm_provider(request: Request, body: Dict[str, Any]):
         provider = "gemini"
     conn = get_db()
     now = datetime.utcnow().isoformat()
-    conn.execute(
-        "INSERT INTO user_llm_preference (user_id, provider, updated_at) VALUES (?, ?, ?) "
-        "ON CONFLICT(user_id) DO UPDATE SET provider = ?, updated_at = ?",
-        (user_id, provider, now, provider, now),
-    )
-    conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError:
+        pass
+    last_error: Optional[Exception] = None
+    for _ in range(5):
+        try:
+            conn.execute(
+                "INSERT INTO user_llm_preference (user_id, provider, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET provider = ?, updated_at = ?",
+                (user_id, provider, now, provider, now),
+            )
+            conn.commit()
+            conn.close()
+            return {"ok": True}
+        except sqlite3.OperationalError as exc:
+            last_error = exc
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            time.sleep(0.1)
     conn.close()
-    return {"ok": True}
+    raise HTTPException(status_code=503, detail=f"database is locked: {last_error}")
 
 
 @app.get("/api/user/chat")
