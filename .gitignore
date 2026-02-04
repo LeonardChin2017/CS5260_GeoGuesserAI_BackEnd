@@ -1,5 +1,5 @@
-node_modules
 .env
 *.log
-uploads/
 data/
+.venv/
+generated_papers/
