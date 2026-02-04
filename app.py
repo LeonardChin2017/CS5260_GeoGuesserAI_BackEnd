@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -389,10 +390,26 @@ def put_gemini_key(request: Request, body: Dict[str, Any]):
 def delete_gemini_key(request: Request):
     user_id = get_user_id(request)
     conn = get_db()
-    conn.execute("DELETE FROM user_gemini_keys WHERE user_id = ?", (user_id,))
-    conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError:
+        pass
+    last_error: Optional[Exception] = None
+    for _ in range(5):
+        try:
+            conn.execute("DELETE FROM user_gemini_keys WHERE user_id = ?", (user_id,))
+            conn.commit()
+            conn.close()
+            return {"ok": True}
+        except sqlite3.OperationalError as exc:
+            last_error = exc
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            time.sleep(0.1)
     conn.close()
-    return {"ok": True}
+    raise HTTPException(status_code=503, detail=f"database is locked: {last_error}")
 
 
 @app.get("/api/user/deepseek-key")
