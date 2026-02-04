@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import os
@@ -142,10 +143,27 @@ FORMAT_GUARD_PROMPT = read_prompt_file(
 )
 
 
+def _decode_jwt_subject(token: str) -> Optional[str]:
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    payload = parts[1]
+    pad = "=" * (-len(payload) % 4)
+    try:
+        data = base64.urlsafe_b64decode(payload + pad)
+        parsed = json.loads(data.decode("utf-8"))
+        sub = parsed.get("sub")
+        return sub if isinstance(sub, str) and sub.strip() else None
+    except Exception:
+        return None
+
+
 def get_user_id(request: Request) -> str:
     auth = request.headers.get("authorization", "").strip()
     if auth.lower().startswith("bearer "):
-        return auth[7:].strip() or "anonymous"
+        token = auth[7:].strip()
+        sub = _decode_jwt_subject(token)
+        return sub or (token or "anonymous")
     return auth or "anonymous"
 
 
@@ -182,6 +200,11 @@ def mask_key(value: str) -> str:
     if len(value) <= 8:
         return "*" * len(value)
     return f"{value[:3]}***{value[-3:]}"
+
+
+def log_event(message: str) -> None:
+    logger.info(message)
+    print(message, flush=True)
 
 
 def parse_style_update(message: str) -> Optional[Dict[str, int]]:
@@ -316,7 +339,7 @@ def chat(req: ChatRequest, request: Request):
     history = req.messages or []
     provider = "deepseek" if (req.llmProvider or "").lower() == "deepseek" else "gemini"
     user_id = get_user_id(request)
-    logger.info("chat request user=%s provider=%s", user_id, provider)
+    log_event(f"chat request user={user_id} provider={provider}")
 
     api_key = (req.apiKey or "").strip()
     if not api_key:
@@ -334,7 +357,7 @@ def chat(req: ChatRequest, request: Request):
             source = "env"
         else:
             source = "none"
-    logger.info("chat key source=%s key=%s", source, mask_key(api_key))
+    log_event(f"chat key source={source} key={mask_key(api_key)}")
 
     if not api_key:
         return JSONResponse(
@@ -404,6 +427,7 @@ def get_gemini_key(request: Request):
     else:
         value = None
     conn.close()
+    log_event(f"get_gemini_key user={user_id} hasKey={bool(value)} cols={sorted(columns)}")
     return {"hasKey": bool(value)}
 
 
@@ -415,6 +439,7 @@ def put_gemini_key(request: Request, body: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="apiKey required")
     conn = get_db()
     columns = set(get_table_columns(conn, "user_gemini_keys"))
+    log_event(f"put_gemini_key user={user_id} cols={sorted(columns)} key={mask_key(api_key)}")
     try:
         conn.execute("BEGIN IMMEDIATE")
     except sqlite3.OperationalError:
@@ -461,6 +486,7 @@ def put_gemini_key(request: Request, body: Dict[str, Any]):
 def delete_gemini_key(request: Request):
     user_id = get_user_id(request)
     conn = get_db()
+    log_event(f"delete_gemini_key user={user_id}")
     try:
         conn.execute("BEGIN IMMEDIATE")
     except sqlite3.OperationalError:
