@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -30,6 +31,9 @@ GENERATED_PAPERS_DIR.mkdir(parents=True, exist_ok=True)
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("jobai")
 
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
@@ -172,6 +176,14 @@ def get_user_api_key(conn: sqlite3.Connection, user_id: str, provider: str) -> s
     return ""
 
 
+def mask_key(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:3]}***{value[-3:]}"
+
+
 def parse_style_update(message: str) -> Optional[Dict[str, int]]:
     text = message.lower()
     if not re.search(r"(font|text).*(size|bigger|smaller|larger)|increase.*font|decrease.*font", text):
@@ -303,17 +315,26 @@ def chat(req: ChatRequest, request: Request):
 
     history = req.messages or []
     provider = "deepseek" if (req.llmProvider or "").lower() == "deepseek" else "gemini"
+    user_id = get_user_id(request)
+    logger.info("chat request user=%s provider=%s", user_id, provider)
 
     api_key = (req.apiKey or "").strip()
     if not api_key:
         try:
             conn = get_db()
-            api_key = get_user_api_key(conn, get_user_id(request), provider)
+            api_key = get_user_api_key(conn, user_id, provider)
             conn.close()
         except Exception:
             api_key = ""
+    source = "request" if api_key else "none"
     if not api_key:
-        api_key = os.getenv("DEEPSEEK_API_KEY" if provider == "deepseek" else "GEMINI_API_KEY", "").strip()
+        env_key = os.getenv("DEEPSEEK_API_KEY" if provider == "deepseek" else "GEMINI_API_KEY", "").strip()
+        if env_key:
+            api_key = env_key
+            source = "env"
+        else:
+            source = "none"
+    logger.info("chat key source=%s key=%s", source, mask_key(api_key))
 
     if not api_key:
         return JSONResponse(
