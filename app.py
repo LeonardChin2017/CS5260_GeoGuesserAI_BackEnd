@@ -360,30 +360,46 @@ def put_gemini_key(request: Request, body: Dict[str, Any]):
         raise HTTPException(status_code=400, detail="apiKey required")
     conn = get_db()
     columns = set(get_table_columns(conn, "user_gemini_keys"))
-    if "encrypted_key" in columns and "api_key" in columns:
-        conn.execute(
-            "INSERT INTO user_gemini_keys (user_id, api_key, encrypted_key) "
-            "VALUES (?, ?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET api_key = ?, encrypted_key = ?",
-            (user_id, api_key, api_key, api_key, api_key),
-        )
-    elif "encrypted_key" in columns:
-        conn.execute(
-            "INSERT INTO user_gemini_keys (user_id, encrypted_key) "
-            "VALUES (?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET encrypted_key = ?",
-            (user_id, api_key, api_key),
-        )
-    else:
-        conn.execute(
-            "INSERT INTO user_gemini_keys (user_id, api_key) "
-            "VALUES (?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET api_key = ?",
-            (user_id, api_key, api_key),
-        )
-    conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError:
+        pass
+    last_error: Optional[Exception] = None
+    for _ in range(5):
+        try:
+            if "encrypted_key" in columns and "api_key" in columns:
+                conn.execute(
+                    "INSERT INTO user_gemini_keys (user_id, api_key, encrypted_key) "
+                    "VALUES (?, ?, ?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET api_key = ?, encrypted_key = ?",
+                    (user_id, api_key, api_key, api_key, api_key),
+                )
+            elif "encrypted_key" in columns:
+                conn.execute(
+                    "INSERT INTO user_gemini_keys (user_id, encrypted_key) "
+                    "VALUES (?, ?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET encrypted_key = ?",
+                    (user_id, api_key, api_key),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO user_gemini_keys (user_id, api_key) "
+                    "VALUES (?, ?) "
+                    "ON CONFLICT(user_id) DO UPDATE SET api_key = ?",
+                    (user_id, api_key, api_key),
+                )
+            conn.commit()
+            conn.close()
+            return {"ok": True}
+        except sqlite3.OperationalError as exc:
+            last_error = exc
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            time.sleep(0.1)
     conn.close()
-    return {"ok": True}
+    raise HTTPException(status_code=503, detail=f"database is locked: {last_error}")
 
 
 @app.delete("/api/user/gemini-key")
