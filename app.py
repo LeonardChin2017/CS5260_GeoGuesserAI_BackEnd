@@ -5,6 +5,8 @@ import os
 import re
 import sqlite3
 import time
+import asyncio
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from playwright.async_api import async_playwright
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
@@ -35,6 +38,275 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("jobai")
+
+
+def log_debug(message: str) -> None:
+    """Helper to log and print debug messages for remote debugging."""
+    logger.info(message)
+    try:
+        print(message, flush=True)
+    except Exception:
+        # In some environments stdout may not be writable; ignore.
+        pass
+
+AGENT_LOCK = asyncio.Lock()
+AGENT_STATE: Dict[str, Any] = {
+    "running": False,
+    "stop": False,
+    "steps": [],
+    "frame": None,
+    "error": None,
+    "last_action": None,
+    "last_frame_at": None,
+}
+AGENT_QUEUE: "asyncio.Queue[str]" = asyncio.Queue()
+AGENT_TASK_STARTED = False
+AGENT_BROWSER: Dict[str, Any] = {
+    "playwright": None,
+    "browser": None,
+    "page": None,
+    "loaded": False,
+}
+
+
+async def _agent_snapshot() -> Dict[str, Any]:
+    log_debug("agent_snapshot called")
+    async with AGENT_LOCK:
+        steps = [dict(step) for step in AGENT_STATE["steps"]]
+        return {
+            "running": bool(AGENT_STATE["running"]),
+            "steps": steps,
+            "error": AGENT_STATE.get("error"),
+            "last_action": AGENT_STATE.get("last_action"),
+            "last_frame_at": AGENT_STATE.get("last_frame_at"),
+        }
+
+
+async def _agent_set_steps(steps: List[Dict[str, Any]]) -> None:
+    async with AGENT_LOCK:
+        AGENT_STATE["steps"] = steps
+
+
+async def _agent_set_frame(frame_b64: Optional[str]) -> None:
+    async with AGENT_LOCK:
+        AGENT_STATE["frame"] = frame_b64
+        AGENT_STATE["last_frame_at"] = datetime.utcnow().isoformat()
+
+
+async def _agent_set_error(message: Optional[str]) -> None:
+    async with AGENT_LOCK:
+        AGENT_STATE["error"] = message
+
+
+async def _agent_set_action(action: Optional[str]) -> None:
+    async with AGENT_LOCK:
+        AGENT_STATE["last_action"] = action
+
+
+async def _ensure_browser() -> None:
+    if AGENT_BROWSER["page"] is not None:
+        return
+    log_debug("starting playwright browser")
+    playwright = await async_playwright().start()
+    browser = await playwright.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-dev-shm-usage"],
+    )
+    page = await browser.new_page(viewport={"width": 1280, "height": 720})
+    AGENT_BROWSER["playwright"] = playwright
+    AGENT_BROWSER["browser"] = browser
+    AGENT_BROWSER["page"] = page
+    AGENT_BROWSER["loaded"] = False
+
+
+async def _shutdown_browser() -> None:
+    try:
+        if AGENT_BROWSER["page"] is not None:
+            await AGENT_BROWSER["page"].close()
+    except Exception:
+        pass
+    try:
+        if AGENT_BROWSER["browser"] is not None:
+            await AGENT_BROWSER["browser"].close()
+    except Exception:
+        pass
+    try:
+        if AGENT_BROWSER["playwright"] is not None:
+            await AGENT_BROWSER["playwright"].stop()
+    except Exception:
+        pass
+    AGENT_BROWSER["page"] = None
+    AGENT_BROWSER["browser"] = None
+    AGENT_BROWSER["playwright"] = None
+    AGENT_BROWSER["loaded"] = False
+
+
+async def _ensure_page_loaded() -> None:
+    log_debug("ensure_page_loaded called")
+    await _ensure_browser()
+    page = AGENT_BROWSER["page"]
+    if page is None:
+        return
+    if AGENT_BROWSER["loaded"]:
+        return
+    log_debug("navigating to https://www.worldguessr.com/")
+    await page.goto("https://www.worldguessr.com/", wait_until="domcontentloaded", timeout=60000)
+    await asyncio.sleep(2.0)
+    AGENT_BROWSER["loaded"] = True
+    image_bytes = await page.screenshot(type="jpeg", quality=70)
+    await _agent_set_frame(base64.b64encode(image_bytes).decode("utf-8"))
+
+
+async def _agent_worker() -> None:
+    log_debug("agent_worker started")
+    min_delay = float(os.getenv("AGENT_STEP_DELAY_MIN_SECONDS", "5"))
+    max_delay = float(os.getenv("AGENT_STEP_DELAY_MAX_SECONDS", "10"))
+    sequence = [
+        ("capture", "Capture current view"),
+        ("rotate_left", "Rotate view left"),
+        ("rotate_right", "Rotate view right"),
+        ("pan_random", "Pan view randomly"),
+        ("move_forward", "Move forward"),
+        ("detect", "Detect signs, language, and road markings"),
+        ("match", "Match visual clues with map patterns"),
+        ("guess", "Place guess and submit"),
+    ]
+    steps_template = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in sequence]
+    current_step_index = -1
+    step_started_at: Optional[float] = None
+    current_step_delay: Optional[float] = None
+    last_frame_at = 0.0
+    frame_interval = float(os.getenv("AGENT_FRAME_INTERVAL_SECONDS", "0.6"))
+
+    async def set_steps_for_start() -> None:
+        nonlocal current_step_index, step_started_at
+        steps = [dict(s) for s in steps_template]
+        if steps:
+            steps[0]["status"] = "running"
+            current_step_index = 0
+            step_started_at = time.monotonic()
+            current_step_delay = random.uniform(min_delay, max_delay)
+        await _agent_set_steps(steps)
+
+    while True:
+        try:
+            cmd = AGENT_QUEUE.get_nowait()
+        except asyncio.QueueEmpty:
+            cmd = None
+
+        if cmd == "start":
+            log_debug("agent_worker received START command")
+            await _agent_set_error(None)
+            await _shutdown_browser()
+            try:
+                await _ensure_page_loaded()
+            except Exception as exc:
+                await _agent_set_error(f"Browser init failed: {exc}")
+                async with AGENT_LOCK:
+                    AGENT_STATE["running"] = False
+                continue
+            async with AGENT_LOCK:
+                AGENT_STATE["running"] = True
+                AGENT_STATE["stop"] = False
+            await set_steps_for_start()
+        elif cmd == "stop":
+            log_debug("agent_worker received STOP command")
+            async with AGENT_LOCK:
+                AGENT_STATE["running"] = False
+                AGENT_STATE["stop"] = True
+            current_step_index = -1
+            step_started_at = None
+
+        try:
+            await _ensure_page_loaded()
+        except Exception as exc:
+            await _agent_set_error(f"Browser init failed: {exc}")
+            log_debug(f"ensure_page_loaded failed: {exc}")
+            await asyncio.sleep(1.0)
+            continue
+
+        page = AGENT_BROWSER["page"]
+        if page is None:
+            await asyncio.sleep(0.5)
+            continue
+
+        # Refresh frame periodically
+        if time.monotonic() - last_frame_at > frame_interval:
+            try:
+                image_bytes = await page.screenshot(type="jpeg", quality=70)
+                await _agent_set_frame(base64.b64encode(image_bytes).decode("utf-8"))
+                last_frame_at = time.monotonic()
+            except Exception as exc:
+                await _agent_set_error(f"Frame capture failed: {exc}")
+                log_debug(f"frame capture failed: {exc}")
+
+        async with AGENT_LOCK:
+            running = AGENT_STATE["running"]
+            should_stop = AGENT_STATE["stop"]
+
+        if running and not should_stop and current_step_index >= 0:
+            if step_started_at is None or current_step_delay is None:
+                step_started_at = time.monotonic()
+                current_step_delay = random.uniform(min_delay, max_delay)
+            elapsed = time.monotonic() - step_started_at
+            if elapsed >= current_step_delay and current_step_index < len(sequence):
+                # Perform action at step boundary
+                sid, _ = sequence[current_step_index]
+                log_debug(f"performing step {current_step_index} id={sid}")
+                try:
+                    if sid in ("rotate_left", "rotate_right"):
+                        await _agent_set_action(sid)
+                        drag = random.randint(140, 240)
+                        direction = -drag if sid == "rotate_left" else drag
+                        await page.mouse.move(640, 360)
+                        await page.mouse.down()
+                        await page.mouse.move(640 + direction, 360, steps=18)
+                        await page.mouse.up()
+                        await asyncio.sleep(0.8)
+                    elif sid == "pan_random":
+                        await _agent_set_action("pan_random")
+                        dx = random.randint(-200, 200)
+                        dy = random.randint(-120, 120)
+                        await page.mouse.move(640, 360)
+                        await page.mouse.down()
+                        await page.mouse.move(640 + dx, 360 + dy, steps=16)
+                        await page.mouse.up()
+                        await asyncio.sleep(0.8)
+                    elif sid == "move_forward":
+                        await _agent_set_action("move_forward")
+                        # Click near center to move forward on street view
+                        cx = random.randint(520, 760)
+                        cy = random.randint(300, 480)
+                        await page.mouse.click(cx, cy)
+                        await asyncio.sleep(1.2)
+                    image_bytes = await page.screenshot(type="jpeg", quality=70)
+                    await _agent_set_frame(base64.b64encode(image_bytes).decode("utf-8"))
+                except Exception as exc:
+                    await _agent_set_error(f"Action failed: {exc}")
+                    log_debug(f"action {sid} failed: {exc}")
+                async with AGENT_LOCK:
+                    if AGENT_STATE["steps"]:
+                        AGENT_STATE["steps"][current_step_index]["status"] = "done"
+                        if current_step_index + 1 < len(AGENT_STATE["steps"]):
+                            AGENT_STATE["steps"][current_step_index + 1]["status"] = "running"
+                current_step_index += 1
+                step_started_at = time.monotonic()
+                current_step_delay = random.uniform(min_delay, max_delay)
+                if current_step_index >= len(sequence):
+                    async with AGENT_LOCK:
+                        AGENT_STATE["running"] = False
+                    current_step_index = -1
+                    step_started_at = None
+
+        await asyncio.sleep(0.2)
+
+
+def _start_agent_thread() -> None:
+    global AGENT_TASK_STARTED
+    if AGENT_TASK_STARTED:
+        return
+    asyncio.create_task(_agent_worker())
+    AGENT_TASK_STARTED = True
 
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
@@ -328,6 +600,61 @@ def root():
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    _start_agent_thread()
+
+
+@app.post("/api/agent/start")
+async def start_agent():
+    _start_agent_thread()
+    async with AGENT_LOCK:
+        if AGENT_STATE["running"]:
+            return await _agent_snapshot()
+        AGENT_STATE["stop"] = False
+        AGENT_STATE["error"] = None
+    await AGENT_QUEUE.put("start")
+    return await _agent_snapshot()
+
+
+@app.post("/api/agent/stop")
+async def stop_agent():
+    _start_agent_thread()
+    async with AGENT_LOCK:
+        AGENT_STATE["stop"] = True
+        AGENT_STATE["running"] = False
+    await AGENT_QUEUE.put("stop")
+    return await _agent_snapshot()
+
+
+@app.get("/api/agent/status")
+async def agent_status():
+    return await _agent_snapshot()
+
+
+@app.get("/api/agent/frame")
+async def agent_frame():
+    _start_agent_thread()
+    try:
+        await _ensure_page_loaded()
+    except Exception as exc:
+        await _agent_set_error(f"Browser init failed: {exc}")
+    async with AGENT_LOCK:
+        frame = AGENT_STATE.get("frame")
+        error = AGENT_STATE.get("error")
+        last_action = AGENT_STATE.get("last_action")
+        last_frame_at = AGENT_STATE.get("last_frame_at")
+    return {
+        "ok": bool(frame),
+        "frame": frame,
+        "error": error,
+        "last_action": last_action,
+        "last_frame_at": last_frame_at,
+    }
+
+
 
 
 @app.post("/api/chat")
