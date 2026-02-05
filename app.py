@@ -35,19 +35,14 @@ GENERATED_PAPERS_DIR.mkdir(parents=True, exist_ok=True)
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "WARNING").upper()
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("jobai")
 
 
 def log_debug(message: str) -> None:
-    """Helper to log and print debug messages for remote debugging."""
-    logger.info(message)
-    try:
-        print(message, flush=True)
-    except Exception:
-        # In some environments stdout may not be writable; ignore.
-        pass
+    """Debug logging disabled (no-op)."""
+    return
 
 AGENT_LOCK = asyncio.Lock()
 AGENT_STATE: Dict[str, Any] = {
