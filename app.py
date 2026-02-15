@@ -30,6 +30,8 @@ DB_PATH = DATA_DIR / "keys.db"
 PROMPTS_DIR = BASE_DIR / "prompts"
 GENERATED_PAPERS_DIR = BASE_DIR / "generated_papers"
 GENERATED_PAPERS_DIR.mkdir(parents=True, exist_ok=True)
+CAPTURED_IMAGES_DIR = DATA_DIR / "captures"
+CAPTURED_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
@@ -38,6 +40,7 @@ GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "WARNING").upper()
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("jobai")
+CAPTURE_PIPELINE_VERSION = "capture-v3-ext-sniff"
 
 
 def log_debug(message: str) -> None:
@@ -58,6 +61,7 @@ AGENT_STATE: Dict[str, Any] = {
     "pending_command": None,
     "command_seq": 0,
     "last_observation": None,
+    "captured_images": [],
 }
 AGENT_QUEUE: "asyncio.Queue[str]" = asyncio.Queue()
 AGENT_TASK_STARTED = False
@@ -109,6 +113,7 @@ async def _agent_snapshot() -> Dict[str, Any]:
     async with AGENT_LOCK:
         steps = [dict(step) for step in AGENT_STATE["steps"]]
         game = dict(AGENT_STATE["game"]) if isinstance(AGENT_STATE.get("game"), dict) else None
+        captured_images = [dict(img) for img in (AGENT_STATE.get("captured_images") or [])]
         return {
             "running": bool(AGENT_STATE["running"]),
             "steps": steps,
@@ -119,6 +124,7 @@ async def _agent_snapshot() -> Dict[str, Any]:
             "pending_command": AGENT_STATE.get("pending_command"),
             "command_seq": int(AGENT_STATE.get("command_seq") or 0),
             "last_observation": AGENT_STATE.get("last_observation"),
+            "captured_images": captured_images,
         }
 
 
@@ -142,6 +148,87 @@ async def _agent_set_error(message: Optional[str]) -> None:
 async def _agent_set_action(action: Optional[str]) -> None:
     async with AGENT_LOCK:
         AGENT_STATE["last_action"] = action
+
+
+def _parse_data_url_image(data_url: str) -> Optional[Dict[str, str]]:
+    raw = (data_url or "").strip()
+    if not raw.startswith("data:image/"):
+        return None
+    comma = raw.find(",")
+    if comma <= 0:
+        return None
+    meta = raw[5:comma]
+    payload = raw[comma + 1 :]
+    if ";base64" not in meta or not payload:
+        return None
+    mime = meta.split(";")[0].strip().lower()
+    if not mime.startswith("image/"):
+        return None
+    try:
+        base64.b64decode(payload, validate=True)
+    except Exception:
+        return None
+    return {"mime": mime, "data": payload}
+
+
+def _mime_to_extension(mime: str) -> str:
+    m = (mime or "").split(";", 1)[0].strip().lower()
+    if m in ("image/jpeg", "image/jpg", "image/pjpeg"):
+        return ".jpg"
+    if m == "image/png":
+        return ".png"
+    if m == "image/webp":
+        return ".webp"
+    if m == "image/gif":
+        return ".gif"
+    if m in ("image/svg+xml", "image/svg"):
+        return ".svg"
+    if m == "image/bmp":
+        return ".bmp"
+    if m == "image/avif":
+        return ".avif"
+    return ".bin"
+
+
+def _guess_extension_from_bytes(raw: bytes) -> Optional[str]:
+    if not raw:
+        return None
+    if raw.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if raw.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if raw.startswith(b"BM"):
+        return ".bmp"
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return ".webp"
+    if len(raw) > 12 and raw[4:12] == b"ftypavif":
+        return ".avif"
+    head = raw[:512].lstrip()
+    lower_head = head.lower()
+    if lower_head.startswith(b"<svg") or (lower_head.startswith(b"<?xml") and b"<svg" in lower_head):
+        return ".svg"
+    return None
+
+
+def _persist_capture_image(image_id: str, mime: str, data_b64: str) -> Optional[str]:
+    try:
+        raw = base64.b64decode(data_b64, validate=True)
+    except Exception:
+        return None
+    if not raw:
+        return None
+    ext = _mime_to_extension(mime)
+    if ext == ".bin":
+        ext = _guess_extension_from_bytes(raw) or ".bin"
+    file_name = f"{image_id}{ext}"
+    file_path = CAPTURED_IMAGES_DIR / file_name
+    try:
+        file_path.write_bytes(raw)
+    except Exception:
+        return None
+    return f"/captured_images/{file_name}"
 
 
 def _step_index(step_id: str) -> int:
@@ -297,6 +384,60 @@ def _render_streetview_frame(game: Dict[str, Any]) -> Optional[Dict[str, str]]:
         return {
             "frame": base64.b64encode(res.content).decode("ascii"),
             "mime": content_type,
+        }
+    except Exception:
+        return None
+
+
+def _render_streetview_from_view(
+    lat: float,
+    lon: float,
+    heading: float,
+    api_key_override: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
+    api_key = (api_key_override or GOOGLE_MAPS_API_KEY or "").strip()
+    if not api_key:
+        return None
+    params = {
+        "size": "640x640",
+        "scale": "2",
+        "location": f"{lat:.6f},{lon:.6f}",
+        "heading": str(int(_wrap_heading(float(heading)))),
+        "pitch": "0",
+        "fov": "90",
+        "key": api_key,
+    }
+    try:
+        res = requests.get("https://maps.googleapis.com/maps/api/streetview", params=params, timeout=20)
+        if not res.ok:
+            return None
+        content_type = (res.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if not content_type.startswith("image/"):
+            return None
+        return {
+            "mime": content_type,
+            "data": base64.b64encode(res.content).decode("ascii"),
+        }
+    except Exception:
+        return None
+
+
+def _render_streetview_from_url(url: Optional[str]) -> Optional[Dict[str, str]]:
+    raw_url = (url or "").strip()
+    if not raw_url:
+        return None
+    if not raw_url.startswith("https://maps.googleapis.com/maps/api/streetview"):
+        return None
+    try:
+        res = requests.get(raw_url, timeout=20)
+        if not res.ok:
+            return None
+        content_type = (res.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if not content_type.startswith("image/"):
+            return None
+        return {
+            "mime": content_type,
+            "data": base64.b64encode(res.content).decode("ascii"),
         }
     except Exception:
         return None
@@ -735,6 +876,7 @@ class AgentObservationRequest(BaseModel):
     command: str
     screenshot: Optional[str] = None
     screenshot_url: Optional[str] = None
+    maps_api_key: Optional[str] = None
     view_lat: Optional[float] = None
     view_lon: Optional[float] = None
     heading: Optional[float] = None
@@ -752,6 +894,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/generated_papers", StaticFiles(directory=GENERATED_PAPERS_DIR), name="generated_papers")
+app.mount("/captured_images", StaticFiles(directory=CAPTURED_IMAGES_DIR), name="captured_images")
 
 
 @app.get("/")
@@ -762,6 +905,31 @@ def root():
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/api/agent/captures")
+def list_captures():
+    files = []
+    try:
+        for p in sorted(CAPTURED_IMAGES_DIR.glob("*")):
+            if p.is_file():
+                files.append(
+                    {
+                        "name": p.name,
+                        "size_bytes": p.stat().st_size,
+                        "url": f"/captured_images/{p.name}",
+                    }
+                )
+    except Exception:
+        files = []
+    return {
+        "version": CAPTURE_PIPELINE_VERSION,
+        "base_dir": str(BASE_DIR),
+        "data_dir": str(DATA_DIR),
+        "dir": str(CAPTURED_IMAGES_DIR),
+        "count": len(files),
+        "files": files,
+    }
 
 
 @app.on_event("startup")
@@ -780,6 +948,7 @@ async def start_agent():
         AGENT_STATE["game"] = _build_game_state()
         AGENT_STATE["steps"] = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in AGENT_STEP_SEQUENCE]
         AGENT_STATE["last_observation"] = None
+        AGENT_STATE["captured_images"] = []
     await _mark_step_running("capture")
     await _set_pending_command("capture")
     await _agent_set_action("capture")
@@ -793,6 +962,10 @@ async def stop_agent():
         AGENT_STATE["stop"] = True
         AGENT_STATE["running"] = False
         AGENT_STATE["pending_command"] = None
+        AGENT_STATE["steps"] = []
+        AGENT_STATE["last_observation"] = None
+        AGENT_STATE["last_action"] = None
+        AGENT_STATE["captured_images"] = []
     return await _agent_snapshot()
 
 
@@ -820,6 +993,7 @@ async def agent_observation(body: AgentObservationRequest):
     if pending != command:
         raise HTTPException(status_code=409, detail=f"unexpected command '{command}', pending '{pending}'")
 
+    capture_debug: Optional[str] = None
     async with AGENT_LOCK:
         game = dict(AGENT_STATE.get("game") or {})
         if body.view_lat is not None:
@@ -833,13 +1007,71 @@ async def agent_observation(body: AgentObservationRequest):
         if body.guess_lon is not None:
             game["guess_lon"] = float(max(-180.0, min(180.0, body.guess_lon)))
         AGENT_STATE["game"] = game
-        AGENT_STATE["last_observation"] = {
+        last_observation: Dict[str, Any] = {
             "command": command,
             "received_at": datetime.utcnow().isoformat(),
             "has_screenshot": bool(body.screenshot),
             "has_screenshot_url": bool(body.screenshot_url),
             "error": body.error,
         }
+        AGENT_STATE["last_observation"] = last_observation
+        if command == "capture" and body.screenshot:
+            parsed = _parse_data_url_image(body.screenshot)
+            if parsed:
+                images = list(AGENT_STATE.get("captured_images") or [])
+                image_id = f"cap-{int(time.time() * 1000)}"
+                saved_url = _persist_capture_image(image_id, parsed["mime"], parsed["data"])
+                images.append(
+                    {
+                        "id": image_id,
+                        "captured_at": datetime.utcnow().isoformat(),
+                        "mime": parsed["mime"],
+                        "data": parsed["data"],
+                        "screenshot_url": body.screenshot_url,
+                        "saved_url": saved_url,
+                    }
+                )
+                AGENT_STATE["captured_images"] = images[-8:]
+                capture_debug = (
+                    f"stored_data_url mime={parsed['mime']} bytes={len(parsed['data'])}"
+                    + (f" saved={saved_url}" if saved_url else " saved=write_failed")
+                )
+            else:
+                capture_debug = "data_url_invalid"
+        elif command == "capture":
+            captured = None
+            if body.screenshot_url:
+                captured = _render_streetview_from_url(body.screenshot_url)
+            if body.view_lat is not None and body.view_lon is not None:
+                captured = captured or _render_streetview_from_view(
+                    float(body.view_lat),
+                    float(body.view_lon),
+                    float(body.heading or 0.0),
+                    body.maps_api_key,
+                )
+            if captured:
+                images = list(AGENT_STATE.get("captured_images") or [])
+                image_id = f"cap-{int(time.time() * 1000)}"
+                saved_url = _persist_capture_image(image_id, captured["mime"], captured["data"])
+                images.append(
+                    {
+                        "id": image_id,
+                        "captured_at": datetime.utcnow().isoformat(),
+                        "mime": captured["mime"],
+                        "data": captured["data"],
+                        "screenshot_url": None,
+                        "saved_url": saved_url,
+                    }
+                )
+                AGENT_STATE["captured_images"] = images[-8:]
+                capture_debug = (
+                    f"stored_backend_view mime={captured['mime']} bytes={len(captured['data'])}"
+                    + (f" saved={saved_url}" if saved_url else " saved=write_failed")
+                )
+            else:
+                capture_debug = "missing_frontend_screenshot_and_backend_view_failed"
+        if command == "capture":
+            AGENT_STATE["last_observation"]["capture_debug"] = capture_debug
 
     # Frontend already performs visual rotation and reports resulting POV.
     # Avoid applying additional backend-side rotate deltas which cause jumpy motion.
@@ -877,6 +1109,12 @@ async def game_start():
     async with AGENT_LOCK:
         AGENT_STATE["game"] = _build_game_state()
         AGENT_STATE["error"] = None
+        AGENT_STATE["running"] = False
+        AGENT_STATE["pending_command"] = None
+        AGENT_STATE["steps"] = []
+        AGENT_STATE["last_observation"] = None
+        AGENT_STATE["last_action"] = None
+        AGENT_STATE["captured_images"] = []
     await _agent_refresh_frame()
     return await _agent_snapshot()
 
