@@ -18,7 +18,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from playwright.async_api import async_playwright
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
@@ -34,6 +33,7 @@ GENERATED_PAPERS_DIR.mkdir(parents=True, exist_ok=True)
 
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "WARNING").upper()
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
@@ -50,30 +50,75 @@ AGENT_STATE: Dict[str, Any] = {
     "stop": False,
     "steps": [],
     "frame": None,
+    "frame_mime": "image/svg+xml",
     "error": None,
     "last_action": None,
     "last_frame_at": None,
+    "game": None,
+    "pending_command": None,
+    "command_seq": 0,
+    "last_observation": None,
 }
 AGENT_QUEUE: "asyncio.Queue[str]" = asyncio.Queue()
 AGENT_TASK_STARTED = False
-AGENT_BROWSER: Dict[str, Any] = {
-    "playwright": None,
-    "browser": None,
-    "page": None,
-    "loaded": False,
-}
+AGENT_STEP_SEQUENCE = [
+    ("capture", "Capture current clues"),
+    ("rotate_left", "Rotate view left"),
+    ("rotate_right", "Rotate view right"),
+    ("pan_random", "Pan around for landmarks"),
+    ("move_forward", "Move forward to gather more clues"),
+    ("detect", "Detect signs, language, and road markings"),
+    ("match", "Match clues to likely country"),
+    ("guess", "Place guess and submit"),
+]
+AGENT_COMMAND_FLOW = ["capture", "rotate_left", "rotate_right", "guess"]
+GEO_LOCATIONS = [
+    {
+        "name": "Shibuya Crossing",
+        "country": "Japan",
+        "lat": 35.6595,
+        "lon": 139.7005,
+        "clues": ["Neon signs", "Left-hand traffic", "Dense urban crossing", "Japanese writing"],
+    },
+    {
+        "name": "Copacabana",
+        "country": "Brazil",
+        "lat": -22.9711,
+        "lon": -43.1822,
+        "clues": ["Beach promenade", "Portuguese text", "Palm trees", "Atlantic coastline"],
+    },
+    {
+        "name": "Table Mountain",
+        "country": "South Africa",
+        "lat": -33.9628,
+        "lon": 18.4098,
+        "clues": ["Flat-topped mountain", "English road signs", "Coastal city", "Southern hemisphere sun"],
+    },
+    {
+        "name": "Reykjavik Harbor",
+        "country": "Iceland",
+        "lat": 64.1466,
+        "lon": -21.9426,
+        "clues": ["Nordic architecture", "Cold weather", "Sparse trees", "Volcanic landscape"],
+    },
+]
 
 
 async def _agent_snapshot() -> Dict[str, Any]:
     log_debug("agent_snapshot called")
     async with AGENT_LOCK:
         steps = [dict(step) for step in AGENT_STATE["steps"]]
+        game = dict(AGENT_STATE["game"]) if isinstance(AGENT_STATE.get("game"), dict) else None
         return {
             "running": bool(AGENT_STATE["running"]),
             "steps": steps,
             "error": AGENT_STATE.get("error"),
             "last_action": AGENT_STATE.get("last_action"),
             "last_frame_at": AGENT_STATE.get("last_frame_at"),
+            "game": game,
+            "pending_command": AGENT_STATE.get("pending_command"),
+            "command_seq": int(AGENT_STATE.get("command_seq") or 0),
+            "last_observation": AGENT_STATE.get("last_observation"),
         }
 
 
@@ -82,9 +127,10 @@ async def _agent_set_steps(steps: List[Dict[str, Any]]) -> None:
         AGENT_STATE["steps"] = steps
 
 
-async def _agent_set_frame(frame_b64: Optional[str]) -> None:
+async def _agent_set_frame(frame_b64: Optional[str], frame_mime: str = "image/svg+xml") -> None:
     async with AGENT_LOCK:
         AGENT_STATE["frame"] = frame_b64
+        AGENT_STATE["frame_mime"] = frame_mime
         AGENT_STATE["last_frame_at"] = datetime.utcnow().isoformat()
 
 
@@ -98,83 +144,244 @@ async def _agent_set_action(action: Optional[str]) -> None:
         AGENT_STATE["last_action"] = action
 
 
-async def _ensure_browser() -> None:
-    if AGENT_BROWSER["page"] is not None:
+def _step_index(step_id: str) -> int:
+    for idx, (sid, _) in enumerate(AGENT_STEP_SEQUENCE):
+        if sid == step_id:
+            return idx
+    return -1
+
+
+async def _mark_step_running(step_id: str) -> None:
+    idx = _step_index(step_id)
+    if idx < 0:
         return
-    log_debug("starting playwright browser")
-    playwright = await async_playwright().start()
-    browser = await playwright.chromium.launch(
-        headless=True,
-        args=["--no-sandbox", "--disable-dev-shm-usage"],
+    async with AGENT_LOCK:
+        if not AGENT_STATE["steps"]:
+            AGENT_STATE["steps"] = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in AGENT_STEP_SEQUENCE]
+        AGENT_STATE["steps"][idx]["status"] = "running"
+
+
+async def _mark_step_done(step_id: str) -> None:
+    idx = _step_index(step_id)
+    if idx < 0:
+        return
+    async with AGENT_LOCK:
+        if not AGENT_STATE["steps"]:
+            AGENT_STATE["steps"] = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in AGENT_STEP_SEQUENCE]
+        AGENT_STATE["steps"][idx]["status"] = "done"
+
+
+async def _set_pending_command(command: Optional[str]) -> None:
+    async with AGENT_LOCK:
+        AGENT_STATE["pending_command"] = command
+        AGENT_STATE["command_seq"] = int(AGENT_STATE.get("command_seq") or 0) + 1
+
+
+def _wrap_heading(degrees: float) -> float:
+    while degrees < 0:
+        degrees += 360
+    while degrees >= 360:
+        degrees -= 360
+    return degrees
+
+
+def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    # Fast equirectangular approximation is sufficient for game scoring.
+    lat1r = lat1 * 0.017453292519943295
+    lat2r = lat2 * 0.017453292519943295
+    lon1r = lon1 * 0.017453292519943295
+    lon2r = lon2 * 0.017453292519943295
+    x = (lon2r - lon1r) * max(0.1, abs((lat1r + lat2r) / 2.0))
+    y = lat2r - lat1r
+    return (x * x + y * y) ** 0.5 * 6371.0
+
+
+def _score_from_distance(distance_km: float) -> int:
+    score = int(max(0.0, 5000.0 - (distance_km * 4.0)))
+    return score
+
+
+def _escape_svg_text(raw: str) -> str:
+    return (
+        raw.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
     )
-    page = await browser.new_page(viewport={"width": 1280, "height": 720})
-    AGENT_BROWSER["playwright"] = playwright
-    AGENT_BROWSER["browser"] = browser
-    AGENT_BROWSER["page"] = page
-    AGENT_BROWSER["loaded"] = False
 
 
-async def _shutdown_browser() -> None:
+def _build_game_state() -> Dict[str, Any]:
+    target = random.choice(GEO_LOCATIONS)
+    return {
+        "target_name": target["name"],
+        "target_country": target["country"],
+        "target_lat": target["lat"],
+        "target_lon": target["lon"],
+        "clues": list(target["clues"]),
+        "guess_lat": random.uniform(-60.0, 65.0),
+        "guess_lon": random.uniform(-170.0, 170.0),
+        "view_lat": target["lat"],
+        "view_lon": target["lon"],
+        "heading": random.uniform(0.0, 359.0),
+        "confidence": 0.2,
+        "detected_clues": [],
+        "best_country_guess": None,
+        "final_distance_km": None,
+        "score": None,
+    }
+
+
+def _render_game_svg(game: Dict[str, Any]) -> str:
+    heading = int(float(game.get("heading") or 0))
+    guess_lat = float(game.get("guess_lat") or 0.0)
+    guess_lon = float(game.get("guess_lon") or 0.0)
+    view_lat = float(game.get("view_lat") or 0.0)
+    view_lon = float(game.get("view_lon") or 0.0)
+    confidence = int(float(game.get("confidence") or 0.0) * 100)
+    clues = game.get("detected_clues") or game.get("clues") or []
+    visible_clues = clues[:4]
+    distance = game.get("final_distance_km")
+    score = game.get("score")
+    best_country = game.get("best_country_guess") or "Analyzing..."
+    result = (
+        f"Distance: {distance:.0f} km | Score: {score}"
+        if isinstance(distance, (int, float)) and isinstance(score, int)
+        else "Round in progress"
+    )
+    clue_rows = "".join(
+        f'<text x="40" y="{220 + i * 34}" font-size="20" fill="#d8e8ff">- {_escape_svg_text(str(clue))}</text>'
+        for i, clue in enumerate(visible_clues)
+    )
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e3a8a"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="720" fill="url(#bg)"/>
+  <rect x="28" y="28" width="1224" height="664" rx="22" fill="#0b1220" stroke="#334155" stroke-width="2"/>
+  <text x="40" y="76" font-size="32" fill="#f8fafc" font-family="Arial">GeoGuess AI Sandbox</text>
+  <text x="40" y="118" font-size="20" fill="#93c5fd" font-family="Arial">Heading: {heading}° | View: ({view_lat:.4f}, {view_lon:.4f}) | Guess: ({guess_lat:.3f}, {guess_lon:.3f}) | Confidence: {confidence}%</text>
+  <text x="40" y="170" font-size="24" fill="#facc15" font-family="Arial">Detected Clues</text>
+  {clue_rows}
+  <text x="40" y="620" font-size="22" fill="#a7f3d0" font-family="Arial">Best Country Match: {_escape_svg_text(str(best_country))}</text>
+  <text x="40" y="660" font-size="24" fill="#fde68a" font-family="Arial">{_escape_svg_text(result)}</text>
+</svg>"""
+    return base64.b64encode(svg.encode("utf-8")).decode("ascii")
+
+
+def _render_streetview_frame(game: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    if not GOOGLE_MAPS_API_KEY:
+        return None
+    lat = float(game.get("view_lat") if game.get("view_lat") is not None else game.get("target_lat") or 0.0)
+    lon = float(game.get("view_lon") if game.get("view_lon") is not None else game.get("target_lon") or 0.0)
+    heading = int(float(game.get("heading") or 0.0))
+    params = {
+        "size": "640x640",
+        "scale": "2",
+        "location": f"{lat:.6f},{lon:.6f}",
+        "heading": str(heading),
+        "pitch": "0",
+        "fov": "90",
+        "key": GOOGLE_MAPS_API_KEY,
+    }
     try:
-        if AGENT_BROWSER["page"] is not None:
-            await AGENT_BROWSER["page"].close()
+        res = requests.get("https://maps.googleapis.com/maps/api/streetview", params=params, timeout=20)
+        if not res.ok:
+            return None
+        content_type = (res.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if not content_type.startswith("image/"):
+            return None
+        return {
+            "frame": base64.b64encode(res.content).decode("ascii"),
+            "mime": content_type,
+        }
     except Exception:
-        pass
-    try:
-        if AGENT_BROWSER["browser"] is not None:
-            await AGENT_BROWSER["browser"].close()
-    except Exception:
-        pass
-    try:
-        if AGENT_BROWSER["playwright"] is not None:
-            await AGENT_BROWSER["playwright"].stop()
-    except Exception:
-        pass
-    AGENT_BROWSER["page"] = None
-    AGENT_BROWSER["browser"] = None
-    AGENT_BROWSER["playwright"] = None
-    AGENT_BROWSER["loaded"] = False
+        return None
 
 
-async def _ensure_page_loaded() -> None:
-    log_debug("ensure_page_loaded called")
-    await _ensure_browser()
-    page = AGENT_BROWSER["page"]
-    if page is None:
+async def _agent_refresh_frame() -> None:
+    async with AGENT_LOCK:
+        game = dict(AGENT_STATE.get("game") or {})
+    if not game:
         return
-    if AGENT_BROWSER["loaded"]:
+    streetview = _render_streetview_frame(game)
+    if streetview:
+        await _agent_set_frame(streetview["frame"], streetview["mime"])
+    else:
+        await _agent_set_frame(_render_game_svg(game), "image/svg+xml")
+
+
+async def _mark_step_progress(step_index: int) -> None:
+    async with AGENT_LOCK:
+        if not AGENT_STATE["steps"]:
+            return
+        if 0 <= step_index < len(AGENT_STATE["steps"]):
+            AGENT_STATE["steps"][step_index]["status"] = "done"
+            if step_index + 1 < len(AGENT_STATE["steps"]):
+                AGENT_STATE["steps"][step_index + 1]["status"] = "running"
+
+
+async def _apply_agent_action(step_id: str) -> None:
+    async with AGENT_LOCK:
+        game = dict(AGENT_STATE.get("game") or {})
+    if not game:
         return
-    log_debug("navigating to https://www.worldguessr.com/")
-    await page.goto("https://www.worldguessr.com/", wait_until="domcontentloaded", timeout=60000)
-    await asyncio.sleep(2.0)
-    AGENT_BROWSER["loaded"] = True
-    image_bytes = await page.screenshot(type="jpeg", quality=70)
-    await _agent_set_frame(base64.b64encode(image_bytes).decode("utf-8"))
+    if step_id == "rotate_left":
+        game["heading"] = _wrap_heading(float(game["heading"]) - random.uniform(25.0, 70.0))
+    elif step_id == "rotate_right":
+        game["heading"] = _wrap_heading(float(game["heading"]) + random.uniform(25.0, 70.0))
+    elif step_id == "pan_random":
+        game["view_lon"] = max(-180.0, min(180.0, float(game["view_lon"]) + random.uniform(-0.002, 0.002)))
+        game["view_lat"] = max(-85.0, min(85.0, float(game["view_lat"]) + random.uniform(-0.001, 0.001)))
+        game["guess_lon"] = max(-180.0, min(180.0, float(game["guess_lon"]) + random.uniform(-16.0, 16.0)))
+        game["guess_lat"] = max(-85.0, min(85.0, float(game["guess_lat"]) + random.uniform(-8.0, 8.0)))
+    elif step_id == "move_forward":
+        heading = float(game["heading"])
+        lat_step = 0.8 * (1 if 0 <= heading < 180 else -1)
+        lon_step = 1.2 * (1 if heading <= 90 or heading >= 270 else -1)
+        game["view_lat"] = max(-85.0, min(85.0, float(game["view_lat"]) + (lat_step * 0.001)))
+        game["view_lon"] = max(-180.0, min(180.0, float(game["view_lon"]) + (lon_step * 0.001)))
+        game["guess_lat"] = max(-85.0, min(85.0, float(game["guess_lat"]) + lat_step))
+        game["guess_lon"] = max(-180.0, min(180.0, float(game["guess_lon"]) + lon_step))
+        game["confidence"] = min(0.95, float(game["confidence"]) + 0.08)
+    elif step_id == "detect":
+        clues = list(game.get("clues") or [])
+        seen = list(game.get("detected_clues") or [])
+        if len(seen) < len(clues):
+            seen.append(clues[len(seen)])
+        game["detected_clues"] = seen
+        game["confidence"] = min(0.98, float(game["confidence"]) + 0.18)
+    elif step_id == "match":
+        game["best_country_guess"] = game.get("target_country")
+        game["confidence"] = min(0.99, float(game["confidence"]) + 0.15)
+    elif step_id == "guess":
+        distance = _distance_km(
+            float(game["guess_lat"]),
+            float(game["guess_lon"]),
+            float(game["target_lat"]),
+            float(game["target_lon"]),
+        )
+        game["final_distance_km"] = distance
+        game["score"] = _score_from_distance(distance)
+    async with AGENT_LOCK:
+        AGENT_STATE["game"] = game
+    await _agent_refresh_frame()
 
 
 async def _agent_worker() -> None:
     log_debug("agent_worker started")
-    min_delay = float(os.getenv("AGENT_STEP_DELAY_MIN_SECONDS", "5"))
-    max_delay = float(os.getenv("AGENT_STEP_DELAY_MAX_SECONDS", "10"))
-    sequence = [
-        ("capture", "Capture current view"),
-        ("rotate_left", "Rotate view left"),
-        ("rotate_right", "Rotate view right"),
-        ("pan_random", "Pan view randomly"),
-        ("move_forward", "Move forward"),
-        ("detect", "Detect signs, language, and road markings"),
-        ("match", "Match visual clues with map patterns"),
-        ("guess", "Place guess and submit"),
-    ]
-    steps_template = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in sequence]
+    min_delay = float(os.getenv("AGENT_STEP_DELAY_MIN_SECONDS", "0.8"))
+    max_delay = float(os.getenv("AGENT_STEP_DELAY_MAX_SECONDS", "1.8"))
+    steps_template = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in AGENT_STEP_SEQUENCE]
     current_step_index = -1
     step_started_at: Optional[float] = None
     current_step_delay: Optional[float] = None
-    last_frame_at = 0.0
-    frame_interval = float(os.getenv("AGENT_FRAME_INTERVAL_SECONDS", "0.6"))
 
     async def set_steps_for_start() -> None:
-        nonlocal current_step_index, step_started_at
+        nonlocal current_step_index, step_started_at, current_step_delay
         steps = [dict(s) for s in steps_template]
         if steps:
             steps[0]["status"] = "running"
@@ -192,18 +399,13 @@ async def _agent_worker() -> None:
         if cmd == "start":
             log_debug("agent_worker received START command")
             await _agent_set_error(None)
-            await _shutdown_browser()
-            try:
-                await _ensure_page_loaded()
-            except Exception as exc:
-                await _agent_set_error(f"Browser init failed: {exc}")
-                async with AGENT_LOCK:
-                    AGENT_STATE["running"] = False
-                continue
+            async with AGENT_LOCK:
+                AGENT_STATE["game"] = _build_game_state()
             async with AGENT_LOCK:
                 AGENT_STATE["running"] = True
                 AGENT_STATE["stop"] = False
             await set_steps_for_start()
+            await _agent_refresh_frame()
         elif cmd == "stop":
             log_debug("agent_worker received STOP command")
             async with AGENT_LOCK:
@@ -211,29 +413,6 @@ async def _agent_worker() -> None:
                 AGENT_STATE["stop"] = True
             current_step_index = -1
             step_started_at = None
-
-        try:
-            await _ensure_page_loaded()
-        except Exception as exc:
-            await _agent_set_error(f"Browser init failed: {exc}")
-            log_debug(f"ensure_page_loaded failed: {exc}")
-            await asyncio.sleep(1.0)
-            continue
-
-        page = AGENT_BROWSER["page"]
-        if page is None:
-            await asyncio.sleep(0.5)
-            continue
-
-        # Refresh frame periodically
-        if time.monotonic() - last_frame_at > frame_interval:
-            try:
-                image_bytes = await page.screenshot(type="jpeg", quality=70)
-                await _agent_set_frame(base64.b64encode(image_bytes).decode("utf-8"))
-                last_frame_at = time.monotonic()
-            except Exception as exc:
-                await _agent_set_error(f"Frame capture failed: {exc}")
-                log_debug(f"frame capture failed: {exc}")
 
         async with AGENT_LOCK:
             running = AGENT_STATE["running"]
@@ -244,50 +423,20 @@ async def _agent_worker() -> None:
                 step_started_at = time.monotonic()
                 current_step_delay = random.uniform(min_delay, max_delay)
             elapsed = time.monotonic() - step_started_at
-            if elapsed >= current_step_delay and current_step_index < len(sequence):
-                # Perform action at step boundary
-                sid, _ = sequence[current_step_index]
+            if elapsed >= current_step_delay and current_step_index < len(AGENT_STEP_SEQUENCE):
+                sid, _ = AGENT_STEP_SEQUENCE[current_step_index]
                 log_debug(f"performing step {current_step_index} id={sid}")
                 try:
-                    if sid in ("rotate_left", "rotate_right"):
-                        await _agent_set_action(sid)
-                        drag = random.randint(140, 240)
-                        direction = -drag if sid == "rotate_left" else drag
-                        await page.mouse.move(640, 360)
-                        await page.mouse.down()
-                        await page.mouse.move(640 + direction, 360, steps=18)
-                        await page.mouse.up()
-                        await asyncio.sleep(0.8)
-                    elif sid == "pan_random":
-                        await _agent_set_action("pan_random")
-                        dx = random.randint(-200, 200)
-                        dy = random.randint(-120, 120)
-                        await page.mouse.move(640, 360)
-                        await page.mouse.down()
-                        await page.mouse.move(640 + dx, 360 + dy, steps=16)
-                        await page.mouse.up()
-                        await asyncio.sleep(0.8)
-                    elif sid == "move_forward":
-                        await _agent_set_action("move_forward")
-                        # Click near center to move forward on street view
-                        cx = random.randint(520, 760)
-                        cy = random.randint(300, 480)
-                        await page.mouse.click(cx, cy)
-                        await asyncio.sleep(1.2)
-                    image_bytes = await page.screenshot(type="jpeg", quality=70)
-                    await _agent_set_frame(base64.b64encode(image_bytes).decode("utf-8"))
+                    await _agent_set_action(sid)
+                    await _apply_agent_action(sid)
                 except Exception as exc:
                     await _agent_set_error(f"Action failed: {exc}")
                     log_debug(f"action {sid} failed: {exc}")
-                async with AGENT_LOCK:
-                    if AGENT_STATE["steps"]:
-                        AGENT_STATE["steps"][current_step_index]["status"] = "done"
-                        if current_step_index + 1 < len(AGENT_STATE["steps"]):
-                            AGENT_STATE["steps"][current_step_index + 1]["status"] = "running"
+                await _mark_step_progress(current_step_index)
                 current_step_index += 1
                 step_started_at = time.monotonic()
                 current_step_delay = random.uniform(min_delay, max_delay)
-                if current_step_index >= len(sequence):
+                if current_step_index >= len(AGENT_STEP_SEQUENCE):
                     async with AGENT_LOCK:
                         AGENT_STATE["running"] = False
                     current_step_index = -1
@@ -576,6 +725,24 @@ class ChatRequest(BaseModel):
     llmProvider: Optional[str] = None
 
 
+class GameActionRequest(BaseModel):
+    action: str
+    guess_lat: Optional[float] = None
+    guess_lon: Optional[float] = None
+
+
+class AgentObservationRequest(BaseModel):
+    command: str
+    screenshot: Optional[str] = None
+    screenshot_url: Optional[str] = None
+    view_lat: Optional[float] = None
+    view_lon: Optional[float] = None
+    heading: Optional[float] = None
+    guess_lat: Optional[float] = None
+    guess_lon: Optional[float] = None
+    error: Optional[str] = None
+
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -604,23 +771,139 @@ async def on_startup() -> None:
 
 @app.post("/api/agent/start")
 async def start_agent():
-    _start_agent_thread()
     async with AGENT_LOCK:
         if AGENT_STATE["running"]:
             return await _agent_snapshot()
+        AGENT_STATE["running"] = True
         AGENT_STATE["stop"] = False
         AGENT_STATE["error"] = None
-    await AGENT_QUEUE.put("start")
+        AGENT_STATE["game"] = _build_game_state()
+        AGENT_STATE["steps"] = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in AGENT_STEP_SEQUENCE]
+        AGENT_STATE["last_observation"] = None
+    await _mark_step_running("capture")
+    await _set_pending_command("capture")
+    await _agent_set_action("capture")
+    await _agent_refresh_frame()
     return await _agent_snapshot()
 
 
 @app.post("/api/agent/stop")
 async def stop_agent():
-    _start_agent_thread()
     async with AGENT_LOCK:
         AGENT_STATE["stop"] = True
         AGENT_STATE["running"] = False
-    await AGENT_QUEUE.put("stop")
+        AGENT_STATE["pending_command"] = None
+    return await _agent_snapshot()
+
+
+@app.get("/api/agent/next-command")
+async def agent_next_command():
+    async with AGENT_LOCK:
+        return {
+            "running": bool(AGENT_STATE["running"]),
+            "command": AGENT_STATE.get("pending_command"),
+            "command_seq": int(AGENT_STATE.get("command_seq") or 0),
+        }
+
+
+@app.post("/api/agent/observation")
+async def agent_observation(body: AgentObservationRequest):
+    command = (body.command or "").strip().lower()
+    if not command:
+        raise HTTPException(status_code=400, detail="command required")
+
+    async with AGENT_LOCK:
+        running = bool(AGENT_STATE["running"])
+        pending = AGENT_STATE.get("pending_command")
+    if not running:
+        raise HTTPException(status_code=409, detail="agent is not running")
+    if pending != command:
+        raise HTTPException(status_code=409, detail=f"unexpected command '{command}', pending '{pending}'")
+
+    async with AGENT_LOCK:
+        game = dict(AGENT_STATE.get("game") or {})
+        if body.view_lat is not None:
+            game["view_lat"] = float(max(-85.0, min(85.0, body.view_lat)))
+        if body.view_lon is not None:
+            game["view_lon"] = float(max(-180.0, min(180.0, body.view_lon)))
+        if body.heading is not None:
+            game["heading"] = _wrap_heading(float(body.heading))
+        if body.guess_lat is not None:
+            game["guess_lat"] = float(max(-85.0, min(85.0, body.guess_lat)))
+        if body.guess_lon is not None:
+            game["guess_lon"] = float(max(-180.0, min(180.0, body.guess_lon)))
+        AGENT_STATE["game"] = game
+        AGENT_STATE["last_observation"] = {
+            "command": command,
+            "received_at": datetime.utcnow().isoformat(),
+            "has_screenshot": bool(body.screenshot),
+            "has_screenshot_url": bool(body.screenshot_url),
+            "error": body.error,
+        }
+
+    # Frontend already performs visual rotation and reports resulting POV.
+    # Avoid applying additional backend-side rotate deltas which cause jumpy motion.
+    if command in ("pan_random", "move_forward", "detect", "match", "guess"):
+        await _apply_agent_action(command)
+    await _mark_step_done(command)
+
+    if command == "capture":
+        await _mark_step_running("rotate_left")
+        await _set_pending_command("rotate_left")
+        await _agent_set_action("rotate_left")
+    elif command == "rotate_left":
+        await _mark_step_running("rotate_right")
+        await _set_pending_command("rotate_right")
+        await _agent_set_action("rotate_right")
+    elif command == "rotate_right":
+        await _mark_step_done("pan_random")
+        await _mark_step_done("move_forward")
+        await _mark_step_done("detect")
+        await _mark_step_done("match")
+        await _mark_step_running("guess")
+        await _set_pending_command("guess")
+        await _agent_set_action("guess")
+    elif command == "guess":
+        await _set_pending_command(None)
+        async with AGENT_LOCK:
+            AGENT_STATE["running"] = False
+
+    await _agent_refresh_frame()
+    return await _agent_snapshot()
+
+
+@app.post("/api/game/start")
+async def game_start():
+    async with AGENT_LOCK:
+        AGENT_STATE["game"] = _build_game_state()
+        AGENT_STATE["error"] = None
+    await _agent_refresh_frame()
+    return await _agent_snapshot()
+
+
+@app.get("/api/game/state")
+async def game_state():
+    async with AGENT_LOCK:
+        game = dict(AGENT_STATE.get("game") or {})
+    return {"ok": bool(game), "game": game}
+
+
+@app.post("/api/game/action")
+async def game_action(body: GameActionRequest):
+    action = (body.action or "").strip().lower()
+    valid = {step_id for step_id, _ in AGENT_STEP_SEQUENCE}
+    if action not in valid:
+        raise HTTPException(status_code=400, detail=f"unsupported action: {action}")
+    if action == "guess" and (body.guess_lat is not None or body.guess_lon is not None):
+        async with AGENT_LOCK:
+            game = dict(AGENT_STATE.get("game") or {})
+            if body.guess_lat is not None:
+                game["guess_lat"] = float(max(-85.0, min(85.0, body.guess_lat)))
+            if body.guess_lon is not None:
+                game["guess_lon"] = float(max(-180.0, min(180.0, body.guess_lon)))
+            AGENT_STATE["game"] = game
+    await _apply_agent_action(action)
+    await _agent_set_action(action)
     return await _agent_snapshot()
 
 
@@ -632,21 +915,25 @@ async def agent_status():
 @app.get("/api/agent/frame")
 async def agent_frame():
     _start_agent_thread()
-    try:
-        await _ensure_page_loaded()
-    except Exception as exc:
-        await _agent_set_error(f"Browser init failed: {exc}")
+    async with AGENT_LOCK:
+        has_frame = bool(AGENT_STATE.get("frame"))
+    if not has_frame:
+        await _agent_refresh_frame()
     async with AGENT_LOCK:
         frame = AGENT_STATE.get("frame")
+        frame_mime = AGENT_STATE.get("frame_mime") or "image/svg+xml"
         error = AGENT_STATE.get("error")
         last_action = AGENT_STATE.get("last_action")
         last_frame_at = AGENT_STATE.get("last_frame_at")
+        game = dict(AGENT_STATE.get("game") or {})
     return {
         "ok": bool(frame),
         "frame": frame,
+        "frame_mime": frame_mime,
         "error": error,
         "last_action": last_action,
         "last_frame_at": last_frame_at,
+        "game": game,
     }
 
 
