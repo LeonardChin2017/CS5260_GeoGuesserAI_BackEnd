@@ -1,18 +1,11 @@
 """
-Stage 1 stub nodes — return mock structured data.
-These will be replaced with real LLM calls in Stage 2.
+Stage 1 stub nodes — return mock structured data for testing.
 
 Each specialist node returns ONLY its own key in specialist_outputs.
 The Annotated reducer in GeoState merges all parallel outputs automatically.
 """
 from graphs.state import GeoState
-
-
-def ingest_node(state: GeoState) -> dict:
-    """Validate screenshot is present; pass through."""
-    if not state.get("screenshot"):
-        return {"error": "No screenshot provided"}
-    return {"error": None}
+from graphs.nodes.ingest import ingest_node  # re-exported for backward compat
 
 
 def text_language_stub(state: GeoState) -> dict:

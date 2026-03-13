@@ -12,7 +12,7 @@ is ROTATE or MOVE, feeding the new screenshot back into the graph.
 """
 from langgraph.graph import StateGraph, END
 from graphs.state import GeoState
-from graphs.nodes.stubs import ingest_node
+from graphs.nodes.ingest import ingest_node
 from graphs.nodes.specialists import (
     text_language_node,
     architecture_node,
