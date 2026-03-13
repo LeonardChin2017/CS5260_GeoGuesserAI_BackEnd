@@ -23,6 +23,9 @@ from reportlab.pdfgen import canvas
 
 load_dotenv()
 
+from graphs.geoguessr_graph import geo_graph
+from graphs.state import GeoState
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -905,6 +908,43 @@ def root():
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+class AnalyzeRequest(BaseModel):
+    screenshot: str          # base64-encoded image (data URL or raw base64)
+    max_iterations: int = 5
+
+
+@app.post("/api/agent/analyze")
+async def agent_analyze(req: AnalyzeRequest):
+    """
+    Stage 1+: Run the LangGraph pipeline on a screenshot.
+    Returns belief_state, action, action_history, final_guess.
+    """
+    initial_state: GeoState = {
+        "screenshot": req.screenshot,
+        "iteration": 0,
+        "max_iterations": req.max_iterations,
+        "specialist_outputs": {},
+        "belief_state": [],
+        "action": {},
+        "action_history": [],
+        "final_guess": None,
+        "error": None,
+    }
+    try:
+        result = geo_graph.invoke(initial_state)
+        return {
+            "belief_state": result.get("belief_state", []),
+            "action": result.get("action", {}),
+            "action_history": result.get("action_history", []),
+            "final_guess": result.get("final_guess"),
+            "specialist_outputs": result.get("specialist_outputs", {}),
+            "iteration": result.get("iteration", 0),
+            "error": result.get("error"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/agent/captures")
