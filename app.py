@@ -25,6 +25,7 @@ load_dotenv()
 
 from graphs.geoguessr_graph import geo_graph
 from graphs.state import GeoState
+from graphs.action_executor import GameView, execute_action
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -918,8 +919,9 @@ class AnalyzeRequest(BaseModel):
 @app.post("/api/agent/analyze")
 async def agent_analyze(req: AnalyzeRequest):
     """
-    Stage 1+: Run the LangGraph pipeline on a screenshot.
+    Single-iteration: run the LangGraph pipeline on one screenshot.
     Returns belief_state, action, action_history, final_guess.
+    Useful for debugging individual iterations.
     """
     initial_state: GeoState = {
         "screenshot": req.screenshot,
@@ -945,6 +947,85 @@ async def agent_analyze(req: AnalyzeRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class RunRequest(BaseModel):
+    screenshot: str          # initial base64 screenshot
+    start_lat: float         # starting Street View position
+    start_lon: float
+    start_heading: int = 0
+    max_iterations: int = 5
+
+
+@app.post("/api/agent/run")
+async def agent_run(req: RunRequest):
+    """
+    Full autopilot loop: runs the multi-iteration exploration pipeline.
+
+    Each iteration:
+      1. Calls the LangGraph pipeline (specialists + fusion) on the current screenshot.
+      2. If fusion returns GUESS → stop and return result.
+      3. If fusion returns ROTATE/MOVE → execute action (fetch new Street View frame) → repeat.
+
+    Stops early on GUESS or when max_iterations is exhausted.
+    """
+    maps_key = os.getenv("GOOGLE_MAPS_API_KEY", "")
+    view = GameView(req.start_lat, req.start_lon, req.start_heading)
+    screenshot = req.screenshot
+
+    belief_state: list = []
+    action_history: list = []
+    result: dict = {}
+    errors: list = []
+
+    for iteration in range(req.max_iterations):
+        state: GeoState = {
+            "screenshot": screenshot,
+            "iteration": iteration,
+            "max_iterations": req.max_iterations,
+            "specialist_outputs": {},       # fresh each iteration
+            "belief_state": belief_state,   # carry forward
+            "action": {},
+            "action_history": action_history,
+            "final_guess": None,
+            "error": None,
+        }
+
+        try:
+            result = geo_graph.invoke(state)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Graph error at iteration {iteration}: {e}")
+
+        belief_state = result.get("belief_state", belief_state)
+        action_history = result.get("action_history", action_history)
+        action = result.get("action", {})
+
+        if result.get("error"):
+            errors.append(result["error"])
+
+        # Committed a guess — done
+        if action.get("type") == "GUESS":
+            break
+
+        # Explore — execute action and fetch new screenshot
+        if not maps_key:
+            errors.append("GOOGLE_MAPS_API_KEY not set; cannot fetch new Street View frame")
+            break
+
+        try:
+            screenshot, view = execute_action(action, view, maps_key)
+        except Exception as e:
+            errors.append(f"Action execution failed at iteration {iteration}: {e}")
+            break
+
+    return {
+        "final_guess": result.get("final_guess"),
+        "belief_state": result.get("belief_state", []),
+        "action_history": action_history,
+        "iterations_used": result.get("iteration", 0),
+        "final_view": view.to_dict(),
+        "errors": errors if errors else None,
+    }
 
 
 @app.get("/api/agent/captures")
