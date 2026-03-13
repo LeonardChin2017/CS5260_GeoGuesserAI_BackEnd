@@ -131,10 +131,10 @@ MOCK_FUSION_ROTATE = json.dumps({
 })
 
 
-def _make_state(iteration=0, max_iterations=5, specialists=None, belief_state=None):
+def _make_state(iteration=0, max_iterations=5, specialists=None, belief_state=None, screenshot=None):
     from graphs.state import GeoState
     return GeoState(
-        screenshot=MOCK_B64,
+        screenshot=screenshot or MOCK_B64,
         iteration=iteration,
         max_iterations=max_iterations,
         specialist_outputs=specialists or HIGH_CONFIDENCE_SPECIALISTS,
@@ -308,9 +308,20 @@ class TestFusionRealGemini:
             assert isinstance(top.get("lon"), (int, float))
 
     def test_fusion_high_confidence_input_likely_guesses(self):
-        """Strong convergent evidence (Russia) should typically produce a GUESS."""
+        """Strong convergent evidence (Russia) should produce a valid action.
+        Uses a real Street View frame so Gemini receives meaningful visual input."""
         from graphs.nodes.fusion import fusion_planner_node
-        result = fusion_planner_node(_make_state(specialists=HIGH_CONFIDENCE_SPECIALISTS))
-        # Not a strict assert — model may choose to explore, but usually guesses
+        from graphs.action_executor import GameView, fetch_streetview_screenshot
+        from dotenv import load_dotenv
+        load_dotenv()
+        # Fetch a real Street View frame so Gemini gets meaningful input
+        view = GameView(55.7558, 37.6173, heading=0)  # Moscow
+        real_screenshot = fetch_streetview_screenshot(view, os.getenv("GOOGLE_MAPS_API_KEY"))
+        result = fusion_planner_node(_make_state(
+            specialists=HIGH_CONFIDENCE_SPECIALISTS,
+            screenshot=real_screenshot,
+        ))
         assert result["action"]["type"] in ("GUESS", "ROTATE", "MOVE")
+        if result["error"] and "429" in str(result["error"]):
+            pytest.skip("Gemini rate limit hit — run integration tests with spacing")
         assert result["error"] is None

@@ -208,17 +208,23 @@ def test_specialist_node_graceful_on_api_error(func_name, agent_key, _):
 
 def test_full_graph_with_mocked_specialists():
     """Full graph produces all 5 specialist outputs when Gemini is mocked."""
+    import json
     from graphs.geoguessr_graph import geo_graph
 
-    def mock_gemini(prompt, screenshot, api_key, model=None):
-        # Return the right mock based on which agent is calling
+    fusion_mock = json.dumps({
+        "belief_state": [{"country": "Russia", "lat": 55.75, "lon": 37.62, "confidence": 0.8, "evidence": "mocked"}],
+        "decision": "GUESS", "action": {"type": "GUESS", "lat": 55.75, "lon": 37.62},
+        "reasoning": "mocked", "top_confidence": 0.8,
+    })
+
+    def mock_specialist(prompt, screenshot, api_key, model=None):
         for key, resp in MOCK_RESPONSES.items():
             if f'"agent": "{key}"' in resp and key in prompt.lower().replace(" ", "_"):
                 return resp
-        # fallback: return text_language mock
         return MOCK_RESPONSES["text_language"]
 
-    with patch("graphs.nodes.specialists.call_gemini_vision", side_effect=mock_gemini):
+    with patch("graphs.nodes.specialists.call_gemini_vision", side_effect=mock_specialist), \
+         patch("graphs.nodes.fusion.call_gemini_vision", return_value=fusion_mock):
         result = geo_graph.invoke(_base_state())
 
     for agent in ["text_language", "architecture", "climate_terrain", "vegetation", "road_infra"]:

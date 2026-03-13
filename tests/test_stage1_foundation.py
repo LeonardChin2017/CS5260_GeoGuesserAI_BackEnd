@@ -7,8 +7,36 @@ Verifies that:
   4. The /api/agent/analyze endpoint works correctly
 """
 import base64
+import json
+from unittest.mock import patch
+
 import pytest
 from fastapi.testclient import TestClient
+
+# ---------------------------------------------------------------------------
+# Autouse fixture: patch all real Gemini calls for every test in this file.
+# These tests verify graph wiring and state schema — not LLM behaviour.
+# Without this, tests call the real API whenever GEMINI_API_KEY is set in .env.
+# ---------------------------------------------------------------------------
+_STUB_SPECIALIST_RESPONSE = json.dumps({
+    "agent": "stub", "detected_scripts": [], "language_hints": [],
+    "place_names": [], "building_styles": [], "climate_zone": "unknown",
+    "terrain_type": "unknown", "vegetation_type": "unknown", "biome": "unknown",
+    "driving_side": "unknown", "confidence": 0.1, "evidence": "[mocked]",
+})
+_STUB_FUSION_RESPONSE = json.dumps({
+    "belief_state": [{"country": "Unknown", "lat": 0.0, "lon": 0.0, "confidence": 0.1, "evidence": "[mocked]"}],
+    "decision": "GUESS", "action": {"type": "GUESS", "lat": 0.0, "lon": 0.0},
+    "reasoning": "mocked", "top_confidence": 0.1,
+})
+
+
+@pytest.fixture(autouse=True)
+def mock_all_gemini_calls():
+    """Prevent any test in this file from calling the real Gemini API."""
+    with patch("graphs.nodes.specialists.call_gemini_vision", return_value=_STUB_SPECIALIST_RESPONSE), \
+         patch("graphs.nodes.fusion.call_gemini_vision", return_value=_STUB_FUSION_RESPONSE):
+        yield
 
 # ---------------------------------------------------------------------------
 # Minimal 1x1 white JPEG as a test screenshot (no external file needed)
@@ -149,18 +177,16 @@ def test_graph_commits_at_budget():
 
 
 def test_graph_explore_decision_when_mocked():
-    """Fusion returns ROTATE when mocked to say so — verifies graph wiring passes action through."""
+    """Fusion returns ROTATE — verifies graph wiring passes the action through correctly."""
     from graphs.geoguessr_graph import geo_graph
-    from unittest.mock import patch
-    import json
-    mock_response = json.dumps({
+    rotate_response = json.dumps({
         "belief_state": [{"country": "Unknown", "lat": 0.0, "lon": 0.0, "confidence": 0.2, "evidence": "unclear"}],
         "decision": "ROTATE", "action": {"type": "ROTATE", "degrees": 90},
         "reasoning": "Low confidence, rotate for more clues.", "top_confidence": 0.2,
     })
     state = _base_state()
     state["max_iterations"] = 5
-    with patch("graphs.nodes.fusion.call_gemini_vision", return_value=mock_response):
+    with patch("graphs.nodes.fusion.call_gemini_vision", return_value=rotate_response):
         result = geo_graph.invoke(state)
     assert result["action"]["type"] == "ROTATE"
     assert result["final_guess"] is None
