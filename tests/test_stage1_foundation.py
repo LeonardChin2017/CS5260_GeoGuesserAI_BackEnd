@@ -148,14 +148,21 @@ def test_graph_commits_at_budget():
     assert result["final_guess"] is not None
 
 
-def test_graph_explores_before_budget():
-    """With budget > 1 and iteration=0, fusion should explore (ROTATE/MOVE)."""
+def test_graph_explore_decision_when_mocked():
+    """Fusion returns ROTATE when mocked to say so — verifies graph wiring passes action through."""
     from graphs.geoguessr_graph import geo_graph
+    from unittest.mock import patch
+    import json
+    mock_response = json.dumps({
+        "belief_state": [{"country": "Unknown", "lat": 0.0, "lon": 0.0, "confidence": 0.2, "evidence": "unclear"}],
+        "decision": "ROTATE", "action": {"type": "ROTATE", "degrees": 90},
+        "reasoning": "Low confidence, rotate for more clues.", "top_confidence": 0.2,
+    })
     state = _base_state()
     state["max_iterations"] = 5
-    state["iteration"] = 0
-    result = geo_graph.invoke(state)
-    assert result["action"]["type"] in ("ROTATE", "MOVE")
+    with patch("graphs.nodes.fusion.call_gemini_vision", return_value=mock_response):
+        result = geo_graph.invoke(state)
+    assert result["action"]["type"] == "ROTATE"
     assert result["final_guess"] is None
 
 
