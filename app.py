@@ -503,14 +503,20 @@ async def _apply_agent_action(step_id: str) -> None:
         game["best_country_guess"] = game.get("target_country")
         game["confidence"] = min(0.99, float(game["confidence"]) + 0.15)
     elif step_id == "guess":
-        distance = _distance_km(
-            float(game["guess_lat"]),
-            float(game["guess_lon"]),
-            float(game["target_lat"]),
-            float(game["target_lon"]),
-        )
-        game["final_distance_km"] = distance
-        game["score"] = _score_from_distance(distance)
+        target_lat = game.get("target_lat")
+        target_lon = game.get("target_lon")
+        if target_lat is None or target_lon is None:
+            game["final_distance_km"] = None
+            game["score"] = 0
+        else:
+            distance = _distance_km(
+                float(game.get("guess_lat", 0.0)),
+                float(game.get("guess_lon", 0.0)),
+                float(target_lat),
+                float(target_lon),
+            )
+            game["final_distance_km"] = distance
+            game["score"] = _score_from_distance(distance)
     async with AGENT_LOCK:
         AGENT_STATE["game"] = game
     await _agent_refresh_frame()
@@ -1056,6 +1062,9 @@ def list_captures():
 @app.on_event("startup")
 async def on_startup() -> None:
     _start_agent_thread()
+    async with AGENT_LOCK:
+        if not AGENT_STATE.get("game"):
+            AGENT_STATE["game"] = _build_game_state()
 
 
 @app.post("/api/agent/start")
