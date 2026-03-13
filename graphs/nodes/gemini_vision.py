@@ -5,6 +5,7 @@ Uses the same direct REST approach as app.py for consistency.
 import json
 import os
 import re
+import time
 
 import requests
 
@@ -49,14 +50,17 @@ def call_gemini_vision(prompt: str, screenshot: str, api_key: str, model: str | 
         },
     }
 
-    resp = requests.post(
-        url,
-        json=body,
-        params={"key": api_key},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    last_exc: Exception = Exception("No attempts made")
+    for attempt in range(3):
+        resp = requests.post(url, json=body, params={"key": api_key}, timeout=30)
+        if resp.status_code == 429:
+            wait = 15 * (attempt + 1)   # 15s, 30s, 45s
+            time.sleep(wait)
+            last_exc = Exception(f"429 rate limit after attempt {attempt + 1}")
+            continue
+        resp.raise_for_status()
+        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    raise last_exc
 
 
 def parse_json_response(text: str) -> dict:
