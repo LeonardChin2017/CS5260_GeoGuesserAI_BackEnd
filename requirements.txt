@@ -4,3 +4,9 @@ requests==2.32.3
 python-dotenv==1.0.1
 reportlab==4.2.5
 playwright
+# LangGraph agent pipeline
+langgraph
+langchain-google-genai
+# Testing
+pytest
+httpx
