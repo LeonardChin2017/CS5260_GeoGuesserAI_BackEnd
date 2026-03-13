@@ -1060,20 +1060,32 @@ async def on_startup() -> None:
 
 @app.post("/api/agent/start")
 async def start_agent():
+    from graphs.agent_runner import run_langgraph_agent, _PIPELINE_STEPS
     async with AGENT_LOCK:
         if AGENT_STATE["running"]:
             return await _agent_snapshot()
+        game = _build_game_state()
         AGENT_STATE["running"] = True
         AGENT_STATE["stop"] = False
         AGENT_STATE["error"] = None
-        AGENT_STATE["game"] = _build_game_state()
-        AGENT_STATE["steps"] = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in AGENT_STEP_SEQUENCE]
+        AGENT_STATE["game"] = game
+        AGENT_STATE["steps"] = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in _PIPELINE_STEPS]
         AGENT_STATE["last_observation"] = None
         AGENT_STATE["captured_images"] = []
-    await _mark_step_running("capture")
-    await _set_pending_command("capture")
-    await _agent_set_action("capture")
+
+    # Fetch initial frame for immediate display, then kick off the pipeline
     await _agent_refresh_frame()
+
+    # Launch background LangGraph runner
+    asyncio.create_task(run_langgraph_agent(
+        agent_state=AGENT_STATE,
+        agent_lock=AGENT_LOCK,
+        start_lat=float(game["view_lat"]),
+        start_lon=float(game["view_lon"]),
+        start_heading=float(game["heading"]),
+        max_iterations=int(os.getenv("AGENT_MAX_ITERATIONS", "5")),
+    ))
+
     return await _agent_snapshot()
 
 
