@@ -4,13 +4,12 @@ API backend for the frontend: health check, LLM chat, question formatting, and t
 
 ---
 
-## Quick start (local)
+## Build the environment
 
 ```bash
 cd Backend
 cp .env.example .env
-python -m venv .venv
-. .venv/bin/activate   # Windows: .venv/Scripts/activate
+conda create -n GGSolver python=3.14 -y && conda activate GGSolver
 pip install -r requirements.txt
 uvicorn app:app --host 0.0.0.0 --port 3001
 ```
