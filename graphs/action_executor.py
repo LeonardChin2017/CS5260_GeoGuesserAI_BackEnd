@@ -19,7 +19,7 @@ MOVE_DISTANCE_METRES = 50
 class GameView:
     """Tracks the current Street View position and heading."""
 
-    def __init__(self, lat: float, lon: float, heading: int = 0):
+    def __init__(self, lat: float, lon: float, heading: float = 0):
         self.lat = lat
         self.lon = lon
         self.heading = heading % 360
@@ -41,7 +41,7 @@ class GameView:
 
     @classmethod
     def from_dict(cls, d: dict) -> "GameView":
-        return cls(d["lat"], d["lon"], d.get("heading", 0))
+        return cls(d["lat"], d["lon"], d.get("heading", 0.0))
 
 
 def fetch_streetview_screenshot(view: GameView, api_key: str, size: str = "640x640") -> str:

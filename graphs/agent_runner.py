@@ -17,12 +17,14 @@ import asyncio
 import math
 import os
 import time
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Any, Dict
 
+from app import AgentState, Game
+from graphs.action_executor import GameView, execute_action, fetch_streetview_screenshot
 from graphs.geoguessr_graph import geo_graph
 from graphs.state import GeoState
-from graphs.action_executor import GameView, execute_action, fetch_streetview_screenshot
+from graphs.util import _0_if_nan
 
 _PIPELINE_STEPS = [
     ("capture",        "Capturing Street View frame"),
@@ -86,7 +88,7 @@ def _specialist_detail(key: str, output: Dict[str, Any]) -> str:
 
 
 async def run_langgraph_agent(
-    agent_state: Dict[str, Any],
+    agent_state: AgentState,
     agent_lock: asyncio.Lock,
     start_lat: float,
     start_lon: float,
@@ -105,31 +107,31 @@ async def run_langgraph_agent(
             if details and sid in details:
                 step["detail"] = details[sid]
             steps.append(step)
-        agent_state["steps"] = steps
+        agent_state.steps = steps
 
     def _update_game_from_result(result: Dict[str, Any], view: GameView) -> None:
-        """Push LangGraph result fields back into agent_state["game"]."""
-        game = dict(agent_state.get("game") or {})
-        game["view_lat"] = view.lat
-        game["view_lon"] = view.lon
-        game["heading"] = view.heading
+        """Push LangGraph result fields back into agent_state.game."""
+        game: Game = Game() if agent_state.game is None else agent_state.game
+        game.view_lat = view.lat
+        game.view_lon = view.lon
+        game.heading = view.heading
 
         belief = result.get("belief_state") or []
         if belief:
             top = belief[0]
-            game["confidence"] = float(top.get("confidence", 0.0))
-            game["best_country_guess"] = top.get("country")
-            game["guess_lat"] = float(top.get("lat", game.get("guess_lat", 0.0)))
-            game["guess_lon"] = float(top.get("lon", game.get("guess_lon", 0.0)))
-            game["detected_clues"] = [top.get("evidence", "")]
+            game.confidence = float(top.get("confidence", 0.0))
+            game.best_country_guess = top.get("country")
+            game.guess_lat = float(top.get("lat", _0_if_nan(game.guess_lat)))
+            game.guess_lon = float(top.get("lon", _0_if_nan(game.guess_lon)))
+            game.detected_clues = [top.get("evidence", "")]
 
         final = result.get("final_guess")
         if final:
-            game["guess_lat"] = float(final.get("lat", game.get("guess_lat", 0.0)))
-            game["guess_lon"] = float(final.get("lon", game.get("guess_lon", 0.0)))
-            game["confidence"] = float(final.get("confidence", game.get("confidence", 0.0)))
+            game.guess_lat = float(final.get("lat", _0_if_nan(game.guess_lat)))
+            game.guess_lon = float(final.get("lon", _0_if_nan(game.guess_lon)))
+            game.confidence = float(final.get("confidence", _0_if_nan(game.confidence)))
 
-        agent_state["game"] = game
+        agent_state.game = game
 
     maps_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
 
@@ -143,7 +145,7 @@ async def run_langgraph_agent(
     try:
         for iteration in range(max_iterations):
             async with agent_lock:
-                if agent_state.get("stop"):
+                if agent_state.stop:
                     break
 
             # ----------------------------------------------------------------
@@ -160,21 +162,21 @@ async def run_langgraph_agent(
                 )
             except Exception as exc:
                 async with agent_lock:
-                    agent_state["error"] = f"Street View fetch failed: {exc}"
-                    agent_state["running"] = False
+                    agent_state.error = f"Street View fetch failed: {exc}"
+                    agent_state.running = False
                 return
 
             _b64 = screenshot.split(",", 1)[1] if "," in screenshot else screenshot
             image_id = f"cap-{int(time.time() * 1000)}"
 
             async with agent_lock:
-                agent_state["frame"] = _b64
-                agent_state["frame_mime"] = "image/jpeg"
-                agent_state["last_frame_at"] = datetime.utcnow().isoformat()
+                agent_state.frame = _b64
+                agent_state.frame_mime = "image/jpeg"
+                agent_state.last_frame_at = datetime.now(UTC).isoformat()
                 # Populate captured_images so the UI thumbnail shows the frame
-                agent_state["captured_images"] = [{
+                agent_state.captured_images = [{
                     "id": image_id,
-                    "captured_at": datetime.utcnow().isoformat(),
+                    "captured_at": datetime.now(UTC).isoformat(),
                     "mime": "image/jpeg",
                     "data": _b64,
                     "screenshot_url": None,
@@ -210,8 +212,8 @@ async def run_langgraph_agent(
                 )
             except Exception as exc:
                 async with agent_lock:
-                    agent_state["error"] = f"Graph error: {exc}"
-                    agent_state["running"] = False
+                    agent_state.error = f"Graph error: {exc}"
+                    agent_state.running = False
                 return
 
             belief_state = result.get("belief_state") or []
@@ -241,7 +243,7 @@ async def run_langgraph_agent(
 
             async with agent_lock:
                 _update_game_from_result(result, view)
-                agent_state["specialist_outputs"] = specialist_outputs
+                agent_state.specialist_outputs = specialist_outputs # TODO fix
                 _set_steps(
                     {"capture": "done",
                      "text_language": "done", "architecture": "done",
@@ -256,24 +258,24 @@ async def run_langgraph_agent(
             # ----------------------------------------------------------------
             if action.get("type") == "GUESS":
                 async with agent_lock:
-                    game = dict(agent_state.get("game") or {})
+                    game: Game = Game() if agent_state.game is None else agent_state.game
                     final = result.get("final_guess") or {}
                     if final:
-                        game["guess_lat"] = float(final.get("lat", game.get("guess_lat", 0.0)))
-                        game["guess_lon"] = float(final.get("lon", game.get("guess_lon", 0.0)))
+                        game.guess_lat = float(final.get("lat", _0_if_nan(game.guess_lat)))
+                        game.guess_lon = float(final.get("lon", _0_if_nan(game.guess_lon)))
 
                     dist = _calc_distance_km(
-                        float(game.get("guess_lat", 0.0)),
-                        float(game.get("guess_lon", 0.0)),
-                        float(game.get("target_lat", 0.0)),
-                        float(game.get("target_lon", 0.0)),
+                        _0_if_nan(game.guess_lat),
+                        _0_if_nan(game.guess_lon),
+                        _0_if_nan(game.target_lat),
+                        _0_if_nan(game.target_lon)
                     )
-                    game["final_distance_km"] = dist
-                    game["score"] = _calc_score(dist)
-                    agent_state["game"] = game
+                    game.final_distance_km = dist
+                    game.score = _calc_score(dist)
+                    agent_state.game = game
 
                     guess_detail = (
-                        f"Distance: {dist:.0f} km | Score: {game['score']}"
+                        f"Distance: {dist:.0f} km | Score: {game.score}"
                     )
                     _set_steps(
                         {"capture": "done",
@@ -283,7 +285,7 @@ async def run_langgraph_agent(
                          "reason": "done", "guess": "done"},
                         details={**spec_details, "reason": reason_detail, "guess": guess_detail},
                     )
-                    agent_state["running"] = False
+                    agent_state.running = False
                 break
 
             else:
@@ -300,7 +302,7 @@ async def run_langgraph_agent(
 
                 if not maps_key:
                     async with agent_lock:
-                        agent_state["running"] = False
+                        agent_state.running = False
                     break
 
                 try:
@@ -311,14 +313,14 @@ async def run_langgraph_agent(
                     view = new_view
                 except Exception:
                     async with agent_lock:
-                        agent_state["running"] = False
+                        agent_state.running = False
                     break
 
     except Exception as exc:
         async with agent_lock:
-            agent_state["error"] = f"Runner error: {exc}"
-            agent_state["running"] = False
+            agent_state.error = f"Runner error: {exc}"
+            agent_state.running = False
         return
 
     async with agent_lock:
-        agent_state["running"] = False
+        agent_state.running = False

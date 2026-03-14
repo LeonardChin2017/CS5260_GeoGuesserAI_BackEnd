@@ -7,8 +7,9 @@ import random
 import re
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, UTC
+from math import nan, isnan
 from pathlib import Path
 from typing import Any, Optional
 
@@ -21,6 +22,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
+
+from graphs.util import _0_if_nan
 
 load_dotenv()
 
@@ -48,8 +51,28 @@ logger = logging.getLogger("jobai")
 CAPTURE_PIPELINE_VERSION = "capture-v3-ext-sniff"
 
 
+def log_debug(s: str):
+    logger.debug(s)
+
 AGENT_LOCK = asyncio.Lock()
 
+
+@dataclass
+class Game:
+    heading: float = nan
+    view_lon: float = nan
+    view_lat: float = nan
+    guess_lon: float = nan
+    guess_lat: float = nan
+    confidence: float = nan
+    detected_clues: list[str] = field(default_factory=list)
+    clues: list[str] = field(default_factory=list)
+    best_country_guess: str = ''
+    target_country: str = ''
+    target_lat: float = nan
+    target_lon: float = nan
+    final_distance_km: float = nan
+    score: int = -1
 
 @dataclass
 class AgentState:
@@ -61,7 +84,7 @@ class AgentState:
     error: Optional[str] = None
     last_action: Optional[str] = None
     last_frame_at: Optional[str] = None
-    game: Optional[dict] = None
+    game: Optional[Game] = None
     pending_command: Optional[str] = None
     command_seq: int = 0
     last_observation: Optional[dict[str, Any]] = None
@@ -121,7 +144,7 @@ async def _agent_snapshot() -> dict[str, Any]:
 
     async with AGENT_LOCK:
         steps = [dict(step) for step in AGENT_STATE.steps]
-        game = dict(AGENT_STATE.game) if isinstance(AGENT_STATE.game, dict) else None
+        game: dict = asdict(AGENT_STATE.game) if isinstance(AGENT_STATE.game, Game) else None
         captured_images = [dict(img) for img in (AGENT_STATE.captured_images or [])]
         return {
             "running": bool(AGENT_STATE.running),
@@ -307,44 +330,37 @@ def _escape_svg_text(raw: str) -> str:
     )
 
 
-def _build_game_state() -> dict[str, Any]:
+def _build_game_state() -> Game:
     target = random.choice(GEO_LOCATIONS)
-    return {
-        "target_name": target["name"],
-        "target_country": target["country"],
-        "target_lat": target["lat"],
-        "target_lon": target["lon"],
-        "clues": list(target["clues"]),
-        "guess_lat": random.uniform(-60.0, 65.0),
-        "guess_lon": random.uniform(-170.0, 170.0),
-        "view_lat": target["lat"],
-        "view_lon": target["lon"],
-        "heading": random.uniform(0.0, 359.0),
-        "confidence": 0.2,
-        "detected_clues": [],
-        "best_country_guess": None,
-        "final_distance_km": None,
-        "score": None,
-    }
-
-
-def _render_game_svg(game: dict[str, Any]) -> str:
-    heading = int(float(game.get("heading") or 0))
-    guess_lat = float(game.get("guess_lat") or 0.0)
-    guess_lon = float(game.get("guess_lon") or 0.0)
-    view_lat = float(game.get("view_lat") or 0.0)
-    view_lon = float(game.get("view_lon") or 0.0)
-    confidence = int(float(game.get("confidence") or 0.0) * 100)
-    clues = game.get("detected_clues") or game.get("clues") or []
-    visible_clues = clues[:4]
-    distance = game.get("final_distance_km")
-    score = game.get("score")
-    best_country = game.get("best_country_guess") or "Analyzing..."
-    result = (
-        f"Distance: {distance:.0f} km | Score: {score}"
-        if isinstance(distance, (int, float)) and isinstance(score, int)
-        else "Round in progress"
+    return Game(
+        target_country=target["country"],
+        target_lat=target["lat"],
+        target_lon=target["lon"],
+        clues=list(target["clues"]),
+        guess_lat=random.uniform(-60.0, 65.0),
+        guess_lon=random.uniform(-170.0, 170.0),
+        view_lat=target["lat"],
+        view_lon=target["lon"],
+        heading=random.uniform(0.0, 359.0),
+        confidence=0.2
     )
+
+
+def _render_game_svg(game: Game) -> str:
+    heading: float = _0_if_nan(game.heading)
+    guess_lat: float = _0_if_nan(game.guess_lat)
+    guess_lon: float = _0_if_nan(game.guess_lon)
+    view_lat: float = _0_if_nan(game.view_lat)
+    view_lon: float = _0_if_nan(game.view_lon)
+    confidence = int((_0_if_nan(game.confidence)) * 100)
+    clues: list[str] = game.detected_clues if len(game.detected_clues) > 0 else \
+        game.clues if len(game.clues) > 0 else []
+    visible_clues: list[str] = clues[:4]
+    distance: float = game.final_distance_km
+    score: int = game.score
+    best_country: str = game.best_country_guess if len(game.best_country_guess) > 0 else "Analyzing..."
+    result = f"Distance: {distance:.0f} km | Score: {score}" if not isnan(distance) and score >= 0 else \
+        "Round in progress"
     clue_rows = "".join(
         f'<text x="40" y="{220 + i * 34}" font-size="20" fill="#d8e8ff">- {_escape_svg_text(str(clue))}</text>'
         for i, clue in enumerate(visible_clues)
@@ -357,7 +373,7 @@ def _render_game_svg(game: dict[str, Any]) -> str:
     </linearGradient>
   </defs>
   <rect width="1280" height="720" fill="url(#bg)"/>
-  <rect x="28" y="28" width="1224" height="664" rx="22" fill="#0b1220" stroke="#334155" stroke-width="2"/>
+  <rect x="28" y="28" width="124" height="664" rx="22" fill="#0b1220" stroke="#334155" stroke-width="2"/>
   <text x="40" y="76" font-size="32" fill="#f8fafc" font-family="Arial">GeoGuess AI Sandbox</text>
   <text x="40" y="118" font-size="20" fill="#93c5fd" font-family="Arial">Heading: {heading}° | View: ({view_lat:.4f}, {view_lon:.4f}) | Guess: ({guess_lat:.3f}, {guess_lon:.3f}) | Confidence: {confidence}%</text>
   <text x="40" y="170" font-size="24" fill="#facc15" font-family="Arial">Detected Clues</text>
@@ -368,12 +384,12 @@ def _render_game_svg(game: dict[str, Any]) -> str:
     return base64.b64encode(svg.encode("utf-8")).decode("ascii")
 
 
-def _render_streetview_frame(game: dict[str, Any]) -> Optional[dict[str, str]]:
+def _render_streetview_frame(game: Game) -> Optional[dict[str, str]]:
     if not GOOGLE_MAPS_API_KEY:
         return None
-    lat = float(game.get("view_lat") if game.get("view_lat") is not None else game.get("target_lat") or 0.0)
-    lon = float(game.get("view_lon") if game.get("view_lon") is not None else game.get("target_lon") or 0.0)
-    heading = int(float(game.get("heading") or 0.0))
+    lat: float = game.view_lat if not isnan(game.view_lat) else _0_if_nan(game.target_lat)
+    lon: float = game.view_lon if not isnan(game.view_lon) else _0_if_nan(game.target_lon)
+    heading: float = _0_if_nan(game.heading)
     params = {
         "size": "640x640",
         "scale": "2",
@@ -411,7 +427,7 @@ def _render_streetview_from_view(
         "size": "640x640",
         "scale": "2",
         "location": f"{lat:.6f},{lon:.6f}",
-        "heading": str(int(_wrap_heading(float(heading)))),
+        "heading": str(int(_wrap_heading(heading))),
         "pitch": "0",
         "fov": "90",
         "key": api_key,
@@ -454,8 +470,8 @@ def _render_streetview_from_url(url: Optional[str]) -> Optional[dict[str, str]]:
 
 async def _agent_refresh_frame() -> None:
     async with AGENT_LOCK:
-        game = dict(AGENT_STATE.game or {})
-    if not game:
+        game: Optional[Game] = AGENT_STATE.game
+    if game is None:
         return
     streetview = _render_streetview_frame(game)
     if streetview:
@@ -476,52 +492,52 @@ async def _mark_step_progress(step_index: int) -> None:
 
 async def _apply_agent_action(step_id: str) -> None:
     async with AGENT_LOCK:
-        game = dict(AGENT_STATE.game or {})
-    if not game:
+        game: Optional[Game] = AGENT_STATE.game
+    if game is None:
         return
     if step_id == "rotate_left":
-        game["heading"] = _wrap_heading(float(game["heading"]) - random.uniform(25.0, 70.0))
+        game.heading = _wrap_heading(game.heading - random.uniform(25.0, 70.0))
     elif step_id == "rotate_right":
-        game["heading"] = _wrap_heading(float(game["heading"]) + random.uniform(25.0, 70.0))
+        game.heading = _wrap_heading(game.heading + random.uniform(25.0, 70.0))
     elif step_id == "pan_random":
-        game["view_lon"] = max(-180.0, min(180.0, float(game["view_lon"]) + random.uniform(-0.002, 0.002)))
-        game["view_lat"] = max(-85.0, min(85.0, float(game["view_lat"]) + random.uniform(-0.001, 0.001)))
-        game["guess_lon"] = max(-180.0, min(180.0, float(game["guess_lon"]) + random.uniform(-16.0, 16.0)))
-        game["guess_lat"] = max(-85.0, min(85.0, float(game["guess_lat"]) + random.uniform(-8.0, 8.0)))
+        game.view_lon = max(-180.0, min(180.0, game.view_lon + random.uniform(-0.002, 0.002)))
+        game.view_lat = max(-85.0, min(85.0, game.view_lat + random.uniform(-0.001, 0.001)))
+        game.guess_lon = max(-180.0, min(180.0, game.guess_lon + random.uniform(-16.0, 16.0)))
+        game.guess_lat = max(-85.0, min(85.0, game.guess_lat + random.uniform(-8.0, 8.0)))
     elif step_id == "move_forward":
-        heading = float(game["heading"])
-        lat_step = 0.8 * (1 if 0 <= heading < 180 else -1)
-        lon_step = 1.2 * (1 if heading <= 90 or heading >= 270 else -1)
-        game["view_lat"] = max(-85.0, min(85.0, float(game["view_lat"]) + (lat_step * 0.001)))
-        game["view_lon"] = max(-180.0, min(180.0, float(game["view_lon"]) + (lon_step * 0.001)))
-        game["guess_lat"] = max(-85.0, min(85.0, float(game["guess_lat"]) + lat_step))
-        game["guess_lon"] = max(-180.0, min(180.0, float(game["guess_lon"]) + lon_step))
-        game["confidence"] = min(0.95, float(game["confidence"]) + 0.08)
+        heading: float = game.heading
+        lat_step: float = 0.8 * (1 if 0 <= heading < 180 else -1)
+        lon_step: float = 1.2 * (1 if heading <= 90 or heading >= 270 else -1)
+        game.view_lat = max(-85.0, min(85.0, game.view_lat + (lat_step * 0.001)))
+        game.view_lon = max(-180.0, min(180.0, game.view_lon + (lon_step * 0.001)))
+        game.guess_lat = max(-85.0, min(85.0, game.guess_lat + lat_step))
+        game.guess_lon = max(-180.0, min(180.0, game.guess_lon + lon_step))
+        game.confidence = min(0.95, game.confidence + 0.08)
     elif step_id == "detect":
-        clues = list(game.get("clues") or [])
-        seen = list(game.get("detected_clues") or [])
+        clues: list[str] = list(game.clues)
+        seen: list[str] = list(game.detected_clues)
         if len(seen) < len(clues):
-            seen.append(clues[len(seen)])
-        game["detected_clues"] = seen
-        game["confidence"] = min(0.98, float(game["confidence"]) + 0.18)
+            seen.append(clues[len(seen)])  # TODO verify not a bug
+        game.detected_clues = seen
+        game.confidence = min(0.98, game.confidence + 0.18)
     elif step_id == "match":
-        game["best_country_guess"] = game.get("target_country")
-        game["confidence"] = min(0.99, float(game["confidence"]) + 0.15)
+        game.best_country_guess = game.target_country
+        game.confidence = min(0.99, game.confidence + 0.15)
     elif step_id == "guess":
-        target_lat = game.get("target_lat")
-        target_lon = game.get("target_lon")
-        if target_lat is None or target_lon is None:
-            game["final_distance_km"] = None
-            game["score"] = 0
+        target_lat: float = game.target_lat
+        target_lon: float = game.target_lon
+        if isnan(target_lat) or isnan(target_lon):
+            game.final_distance_km = nan
+            game.score = 0
         else:
             distance = _distance_km(
-                float(game.get("guess_lat", 0.0)),
-                float(game.get("guess_lon", 0.0)),
-                float(target_lat),
-                float(target_lon),
+                _0_if_nan(game.guess_lat),
+                _0_if_nan(game.guess_lon),
+                target_lat,
+                target_lon,
             )
-            game["final_distance_km"] = distance
-            game["score"] = _score_from_distance(distance)
+            game.final_distance_km = distance
+            game.score = _score_from_distance(distance)
     async with AGENT_LOCK:
         AGENT_STATE.game = game
     await _agent_refresh_frame()
@@ -663,7 +679,7 @@ def init_db() -> None:
     ensure_column(conn, "user_llm_preference", "updated_at", "TEXT")
     ensure_column(conn, "user_chat", "updated_at", "TEXT")
     ensure_column(conn, "user_links", "links", "TEXT")
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(UTC).isoformat()
     try:
         conn.execute("UPDATE user_llm_preference SET updated_at = ? WHERE updated_at IS NULL", (now,))
     except Exception:
@@ -803,7 +819,7 @@ def build_question_list(formatted_text: str, user_message: str) -> Optional[list
 def generate_pdf(questions: list[str], title: str = "Generated Question Sheet") -> Optional[str]:
     if not questions:
         return None
-    file_name = f"paper_{int(datetime.utcnow().timestamp() * 1000)}.pdf"
+    file_name = f"paper_{int(datetime.now(UTC).timestamp() * 1000)}.pdf"
     file_path = GENERATED_PAPERS_DIR / file_name
     try:
         c = canvas.Canvas(str(file_path), pagesize=A4)
@@ -1063,8 +1079,8 @@ def list_captures():
 async def on_startup() -> None:
     _start_agent_thread()
     async with AGENT_LOCK:
-        if not AGENT_STATE.get("game"):
-            AGENT_STATE["game"] = _build_game_state()
+        if not AGENT_STATE.game is not None:
+            AGENT_STATE.game = _build_game_state()
 
 
 @app.post("/api/agent/start")
@@ -1089,9 +1105,9 @@ async def start_agent():
     asyncio.create_task(run_langgraph_agent(
         agent_state=AGENT_STATE,
         agent_lock=AGENT_LOCK,
-        start_lat=float(game["view_lat"]),
-        start_lon=float(game["view_lon"]),
-        start_heading=float(game["heading"]),
+        start_lat=float(game.view_lat),
+        start_lon=float(game.view_lon),
+        start_heading=float(game.heading),
         max_iterations=int(os.getenv("AGENT_MAX_ITERATIONS", "5")),
     ))
 
@@ -1137,17 +1153,17 @@ async def agent_observation(body: AgentObservationRequest):
 
     capture_debug: Optional[str] = None
     async with AGENT_LOCK:
-        game = dict(AGENT_STATE.game or {})
+        game: Game = Game() if AGENT_STATE.game is None else AGENT_STATE.game
         if body.view_lat is not None:
-            game["view_lat"] = float(max(-85.0, min(85.0, body.view_lat)))
+            game.view_lat = float(max(-85.0, min(85.0, body.view_lat)))
         if body.view_lon is not None:
-            game["view_lon"] = float(max(-180.0, min(180.0, body.view_lon)))
+            game.view_lon = float(max(-180.0, min(180.0, body.view_lon)))
         if body.heading is not None:
-            game["heading"] = _wrap_heading(float(body.heading))
+            game.heading = _wrap_heading(float(body.heading))
         if body.guess_lat is not None:
-            game["guess_lat"] = float(max(-85.0, min(85.0, body.guess_lat)))
+            game.guess_lat = float(max(-85.0, min(85.0, body.guess_lat)))
         if body.guess_lon is not None:
-            game["guess_lon"] = float(max(-180.0, min(180.0, body.guess_lon)))
+            game.guess_lon = float(max(-180.0, min(180.0, body.guess_lon)))
         AGENT_STATE.game = game
         last_observation: dict[str, Any] = {
             "command": command,
@@ -1166,7 +1182,7 @@ async def agent_observation(body: AgentObservationRequest):
                 images.append(
                     {
                         "id": image_id,
-                        "captured_at": datetime.utcnow().isoformat(),
+                        "captured_at": datetime.now(UTC).isoformat(),
                         "mime": parsed["mime"],
                         "data": parsed["data"],
                         "screenshot_url": body.screenshot_url,
@@ -1198,7 +1214,7 @@ async def agent_observation(body: AgentObservationRequest):
                 images.append(
                     {
                         "id": image_id,
-                        "captured_at": datetime.utcnow().isoformat(),
+                        "captured_at": datetime.now(UTC).isoformat(),
                         "mime": captured["mime"],
                         "data": captured["data"],
                         "screenshot_url": None,
@@ -1264,8 +1280,8 @@ async def game_start():
 @app.get("/api/game/state")
 async def game_state():
     async with AGENT_LOCK:
-        game = dict(AGENT_STATE.game or {})
-    return {"ok": bool(game), "game": game}
+        game: Game = Game() if AGENT_STATE.game is None else AGENT_STATE.game
+    return {"ok": bool(game), "game": asdict(game)}
 
 
 @app.post("/api/game/action")
@@ -1276,11 +1292,11 @@ async def game_action(body: GameActionRequest):
         raise HTTPException(status_code=400, detail=f"unsupported action: {action}")
     if action == "guess" and (body.guess_lat is not None or body.guess_lon is not None):
         async with AGENT_LOCK:
-            game = dict(AGENT_STATE.game or {})
+            game: Game = Game() if AGENT_STATE.game is None else AGENT_STATE.game
             if body.guess_lat is not None:
-                game["guess_lat"] = float(max(-85.0, min(85.0, body.guess_lat)))
+                game.guess_lat = max(-85.0, min(85.0, body.guess_lat))
             if body.guess_lon is not None:
-                game["guess_lon"] = float(max(-180.0, min(180.0, body.guess_lon)))
+                game.guess_lon = max(-180.0, min(180.0, body.guess_lon))
             AGENT_STATE.game = game
     await _apply_agent_action(action)
     await _agent_set_action(action)
@@ -1305,7 +1321,7 @@ async def agent_frame():
         error = AGENT_STATE.error
         last_action = AGENT_STATE.last_action
         last_frame_at = AGENT_STATE.last_frame_at
-        game = dict(AGENT_STATE.game or {})
+        game: Game = Game() if AGENT_STATE.game is None else AGENT_STATE.game
     return {
         "ok": bool(frame),
         "frame": frame,
@@ -1549,7 +1565,7 @@ def put_llm_provider(request: Request, body: dict[str, Any]):
     if provider not in ("gemini", "deepseek"):
         provider = "gemini"
     conn = get_db()
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(UTC).isoformat()
     try:
         conn.execute("BEGIN IMMEDIATE")
     except sqlite3.OperationalError:
@@ -1597,7 +1613,7 @@ def save_chat(request: Request, body: dict[str, Any]):
     if not isinstance(messages, list):
         raise HTTPException(status_code=400, detail="messages array required")
     conn = get_db()
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(UTC).isoformat()
     conn.execute(
         "INSERT INTO user_chat (user_id, messages, updated_at) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET messages = ?, updated_at = ?",
         (user_id, json.dumps(messages), now, json.dumps(messages), now),
