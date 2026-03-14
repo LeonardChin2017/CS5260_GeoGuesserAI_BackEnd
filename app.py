@@ -1,15 +1,16 @@
+import asyncio
 import base64
 import json
 import logging
 import os
+import random
 import re
 import sqlite3
 import time
-import asyncio
-import random
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, UTC
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import requests
 from dotenv import load_dotenv
@@ -48,24 +49,29 @@ CAPTURE_PIPELINE_VERSION = "capture-v3-ext-sniff"
 
 
 AGENT_LOCK = asyncio.Lock()
-AGENT_STATE: Dict[str, Any] = {
-    "running": False,
-    "stop": False,
-    "steps": [],
-    "frame": None,
-    "frame_mime": "image/svg+xml",
-    "error": None,
-    "last_action": None,
-    "last_frame_at": None,
-    "game": None,
-    "pending_command": None,
-    "command_seq": 0,
-    "last_observation": None,
-    "captured_images": [],
-}
-AGENT_QUEUE: "asyncio.Queue[str]" = asyncio.Queue()
-AGENT_TASK_STARTED = False
-AGENT_STEP_SEQUENCE = [
+
+
+@dataclass
+class AgentState:
+    running: bool = False
+    stop: bool = False
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    frame: Optional[str] = None
+    frame_mime: str = "image/svg+xml"
+    error: Optional[str] = None
+    last_action: Optional[str] = None
+    last_frame_at: Optional[str] = None
+    game: Optional[dict] = None
+    pending_command: Optional[str] = None
+    command_seq: int = 0
+    last_observation: Optional[dict[str, Any]] = None
+    captured_images: list[dict[str, Any]] = field(default_factory=list)
+
+
+AGENT_STATE: AgentState = AgentState()
+AGENT_QUEUE: asyncio.Queue[str] = asyncio.Queue()
+AGENT_TASK_STARTED: bool = False
+AGENT_STEP_SEQUENCE: list[tuple[str, str]] = [
     ("capture", "Capture current clues"),
     ("rotate_left", "Rotate view left"),
     ("rotate_right", "Rotate view right"),
@@ -75,6 +81,9 @@ AGENT_STEP_SEQUENCE = [
     ("match", "Match clues to likely country"),
     ("guess", "Place guess and submit"),
 ]
+
+AGENT_COMMAND_FLOW: list[str] = ["capture", "rotate_left", "rotate_right", "guess"]
+
 GEO_LOCATIONS = [
     {
         "name": "Shibuya Crossing",
@@ -107,48 +116,50 @@ GEO_LOCATIONS = [
 ]
 
 
-async def _agent_snapshot() -> Dict[str, Any]:
+async def _agent_snapshot() -> dict[str, Any]:
+    log_debug("agent_snapshot called")
+
     async with AGENT_LOCK:
-        steps = [dict(step) for step in AGENT_STATE["steps"]]
-        game = dict(AGENT_STATE["game"]) if isinstance(AGENT_STATE.get("game"), dict) else None
-        captured_images = [dict(img) for img in (AGENT_STATE.get("captured_images") or [])]
+        steps = [dict(step) for step in AGENT_STATE.steps]
+        game = dict(AGENT_STATE.game) if isinstance(AGENT_STATE.game, dict) else None
+        captured_images = [dict(img) for img in (AGENT_STATE.captured_images or [])]
         return {
-            "running": bool(AGENT_STATE["running"]),
+            "running": bool(AGENT_STATE.running),
             "steps": steps,
-            "error": AGENT_STATE.get("error"),
-            "last_action": AGENT_STATE.get("last_action"),
-            "last_frame_at": AGENT_STATE.get("last_frame_at"),
+            "error": AGENT_STATE.error,
+            "last_action": AGENT_STATE.last_action,
+            "last_frame_at": AGENT_STATE.last_frame_at,
             "game": game,
-            "pending_command": AGENT_STATE.get("pending_command"),
-            "command_seq": int(AGENT_STATE.get("command_seq") or 0),
-            "last_observation": AGENT_STATE.get("last_observation"),
+            "pending_command": AGENT_STATE.pending_command,
+            "command_seq": int(AGENT_STATE.command_seq or 0),
+            "last_observation": AGENT_STATE.last_observation,
             "captured_images": captured_images,
         }
 
 
-async def _agent_set_steps(steps: List[Dict[str, Any]]) -> None:
+async def _agent_set_steps(steps: list[dict[str, Any]]) -> None:
     async with AGENT_LOCK:
-        AGENT_STATE["steps"] = steps
+        AGENT_STATE.steps = steps
 
 
 async def _agent_set_frame(frame_b64: Optional[str], frame_mime: str = "image/svg+xml") -> None:
     async with AGENT_LOCK:
-        AGENT_STATE["frame"] = frame_b64
-        AGENT_STATE["frame_mime"] = frame_mime
-        AGENT_STATE["last_frame_at"] = datetime.utcnow().isoformat()
+        AGENT_STATE.frame = frame_b64
+        AGENT_STATE.frame_mime = frame_mime
+        AGENT_STATE.last_frame_at = datetime.now(UTC).isoformat()
 
 
 async def _agent_set_error(message: Optional[str]) -> None:
     async with AGENT_LOCK:
-        AGENT_STATE["error"] = message
+        AGENT_STATE.error = message
 
 
 async def _agent_set_action(action: Optional[str]) -> None:
     async with AGENT_LOCK:
-        AGENT_STATE["last_action"] = action
+        AGENT_STATE.last_action = action
 
 
-def _parse_data_url_image(data_url: str) -> Optional[Dict[str, str]]:
+def _parse_data_url_image(data_url: str) -> Optional[dict[str, str]]:
     raw = (data_url or "").strip()
     if not raw.startswith("data:image/"):
         return None
@@ -241,9 +252,9 @@ async def _mark_step_running(step_id: str) -> None:
     if idx < 0:
         return
     async with AGENT_LOCK:
-        if not AGENT_STATE["steps"]:
-            AGENT_STATE["steps"] = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in AGENT_STEP_SEQUENCE]
-        AGENT_STATE["steps"][idx]["status"] = "running"
+        if not AGENT_STATE.steps:
+            AGENT_STATE.steps = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in AGENT_STEP_SEQUENCE]
+        AGENT_STATE.steps[idx]["status"] = "running"
 
 
 async def _mark_step_done(step_id: str) -> None:
@@ -251,15 +262,15 @@ async def _mark_step_done(step_id: str) -> None:
     if idx < 0:
         return
     async with AGENT_LOCK:
-        if not AGENT_STATE["steps"]:
-            AGENT_STATE["steps"] = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in AGENT_STEP_SEQUENCE]
-        AGENT_STATE["steps"][idx]["status"] = "done"
+        if not AGENT_STATE.steps:
+            AGENT_STATE.steps = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in AGENT_STEP_SEQUENCE]
+        AGENT_STATE.steps[idx]["status"] = "done"
 
 
 async def _set_pending_command(command: Optional[str]) -> None:
     async with AGENT_LOCK:
-        AGENT_STATE["pending_command"] = command
-        AGENT_STATE["command_seq"] = int(AGENT_STATE.get("command_seq") or 0) + 1
+        AGENT_STATE.pending_command = command
+        AGENT_STATE.command_seq = int(AGENT_STATE.command_seq or 0) + 1
 
 
 def _wrap_heading(degrees: float) -> float:
@@ -296,7 +307,7 @@ def _escape_svg_text(raw: str) -> str:
     )
 
 
-def _build_game_state() -> Dict[str, Any]:
+def _build_game_state() -> dict[str, Any]:
     target = random.choice(GEO_LOCATIONS)
     return {
         "target_name": target["name"],
@@ -317,7 +328,7 @@ def _build_game_state() -> Dict[str, Any]:
     }
 
 
-def _render_game_svg(game: Dict[str, Any]) -> str:
+def _render_game_svg(game: dict[str, Any]) -> str:
     heading = int(float(game.get("heading") or 0))
     guess_lat = float(game.get("guess_lat") or 0.0)
     guess_lon = float(game.get("guess_lon") or 0.0)
@@ -357,7 +368,7 @@ def _render_game_svg(game: Dict[str, Any]) -> str:
     return base64.b64encode(svg.encode("utf-8")).decode("ascii")
 
 
-def _render_streetview_frame(game: Dict[str, Any]) -> Optional[Dict[str, str]]:
+def _render_streetview_frame(game: dict[str, Any]) -> Optional[dict[str, str]]:
     if not GOOGLE_MAPS_API_KEY:
         return None
     lat = float(game.get("view_lat") if game.get("view_lat") is not None else game.get("target_lat") or 0.0)
@@ -392,7 +403,7 @@ def _render_streetview_from_view(
     lon: float,
     heading: float,
     api_key_override: Optional[str] = None,
-) -> Optional[Dict[str, str]]:
+) -> Optional[dict[str, str]]:
     api_key = (api_key_override or GOOGLE_MAPS_API_KEY or "").strip()
     if not api_key:
         return None
@@ -420,7 +431,7 @@ def _render_streetview_from_view(
         return None
 
 
-def _render_streetview_from_url(url: Optional[str]) -> Optional[Dict[str, str]]:
+def _render_streetview_from_url(url: Optional[str]) -> Optional[dict[str, str]]:
     raw_url = (url or "").strip()
     if not raw_url:
         return None
@@ -443,7 +454,7 @@ def _render_streetview_from_url(url: Optional[str]) -> Optional[Dict[str, str]]:
 
 async def _agent_refresh_frame() -> None:
     async with AGENT_LOCK:
-        game = dict(AGENT_STATE.get("game") or {})
+        game = dict(AGENT_STATE.game or {})
     if not game:
         return
     streetview = _render_streetview_frame(game)
@@ -455,17 +466,17 @@ async def _agent_refresh_frame() -> None:
 
 async def _mark_step_progress(step_index: int) -> None:
     async with AGENT_LOCK:
-        if not AGENT_STATE["steps"]:
+        if not AGENT_STATE.steps:
             return
-        if 0 <= step_index < len(AGENT_STATE["steps"]):
-            AGENT_STATE["steps"][step_index]["status"] = "done"
-            if step_index + 1 < len(AGENT_STATE["steps"]):
-                AGENT_STATE["steps"][step_index + 1]["status"] = "running"
+        if 0 <= step_index < len(AGENT_STATE.steps):
+            AGENT_STATE.steps[step_index]["status"] = "done"
+            if step_index + 1 < len(AGENT_STATE.steps):
+                AGENT_STATE.steps[step_index + 1]["status"] = "running"
 
 
 async def _apply_agent_action(step_id: str) -> None:
     async with AGENT_LOCK:
-        game = dict(AGENT_STATE.get("game") or {})
+        game = dict(AGENT_STATE.game or {})
     if not game:
         return
     if step_id == "rotate_left":
@@ -512,7 +523,7 @@ async def _apply_agent_action(step_id: str) -> None:
             game["final_distance_km"] = distance
             game["score"] = _score_from_distance(distance)
     async with AGENT_LOCK:
-        AGENT_STATE["game"] = game
+        AGENT_STATE.game = game
     await _agent_refresh_frame()
 
 
@@ -543,22 +554,22 @@ async def _agent_worker() -> None:
         if cmd == "start":
             await _agent_set_error(None)
             async with AGENT_LOCK:
-                AGENT_STATE["game"] = _build_game_state()
+                AGENT_STATE.game = _build_game_state()
             async with AGENT_LOCK:
-                AGENT_STATE["running"] = True
-                AGENT_STATE["stop"] = False
+                AGENT_STATE.running = True
+                AGENT_STATE.stop = False
             await set_steps_for_start()
             await _agent_refresh_frame()
         elif cmd == "stop":
             async with AGENT_LOCK:
-                AGENT_STATE["running"] = False
-                AGENT_STATE["stop"] = True
+                AGENT_STATE.running = False
+                AGENT_STATE.stop = True
             current_step_index = -1
             step_started_at = None
 
         async with AGENT_LOCK:
-            running = AGENT_STATE["running"]
-            should_stop = AGENT_STATE["stop"]
+            running = AGENT_STATE.running
+            should_stop = AGENT_STATE.stop
 
         if running and not should_stop and current_step_index >= 0:
             if step_started_at is None or current_step_delay is None:
@@ -578,7 +589,7 @@ async def _agent_worker() -> None:
                 current_step_delay = random.uniform(min_delay, max_delay)
                 if current_step_index >= len(AGENT_STEP_SEQUENCE):
                     async with AGENT_LOCK:
-                        AGENT_STATE["running"] = False
+                        AGENT_STATE.running = False
                     current_step_index = -1
                     step_started_at = None
 
@@ -680,7 +691,7 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, col_def: st
         return
 
 
-def get_table_columns(conn: sqlite3.Connection, table: str) -> List[str]:
+def get_table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     try:
         cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
         return [row["name"] for row in cols]
@@ -690,7 +701,7 @@ def get_table_columns(conn: sqlite3.Connection, table: str) -> List[str]:
 
 SYSTEM_PROMPT = read_prompt_file(
     "system.txt",
-    "You are an exam question drafting assistant. Generate exam questions in plain text.",
+    "You are an exam question drafting assistant. Generate exam questions in plain text.", # TODO overwrite
 )
 
 FORMAT_GUARD_PROMPT = read_prompt_file(
@@ -763,7 +774,7 @@ def log_event(message: str) -> None:
     print(message, flush=True)
 
 
-def parse_style_update(message: str) -> Optional[Dict[str, int]]:
+def parse_style_update(message: str) -> Optional[dict[str, int]]:
     text = message.lower()
     if not re.search(r"(font|text).*(size|bigger|smaller|larger)|increase.*font|decrease.*font", text):
         return None
@@ -778,7 +789,7 @@ def strip_markdown(text: str) -> str:
     return re.sub(r"^#+\s*", "", re.sub(r"\*([^*]+)\*", r"\1", text, flags=re.M)).strip()
 
 
-def build_question_list(formatted_text: str, user_message: str) -> Optional[List[str]]:
+def build_question_list(formatted_text: str, user_message: str) -> Optional[list[str]]:
     lines = [l.strip() for l in formatted_text.split("\n") if l.strip()]
     numbered = [l for l in lines if re.match(r"^\d+\.\s+", l)]
     if not numbered:
@@ -789,7 +800,7 @@ def build_question_list(formatted_text: str, user_message: str) -> Optional[List
     return [re.sub(r"^\d+\.\s+", "", l).strip() for l in numbered if l.strip()]
 
 
-def generate_pdf(questions: List[str], title: str = "Generated Question Sheet") -> Optional[str]:
+def generate_pdf(questions: list[str], title: str = "Generated Question Sheet") -> Optional[str]:
     if not questions:
         return None
     file_name = f"paper_{int(datetime.utcnow().timestamp() * 1000)}.pdf"
@@ -820,7 +831,7 @@ def generate_pdf(questions: List[str], title: str = "Generated Question Sheet") 
         return None
 
 
-def call_gemini(contents: List[Dict[str, Any]], api_key: str, system_text: str) -> Optional[str]:
+def call_gemini(contents: list[dict[str, Any]], api_key: str, system_text: str) -> Optional[str]:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
     body = {"systemInstruction": {"parts": [{"text": system_text}]}, "contents": contents}
     res = requests.post(url, json=body, timeout=60)
@@ -834,7 +845,7 @@ def call_gemini(contents: List[Dict[str, Any]], api_key: str, system_text: str) 
     return None
 
 
-def call_deepseek(messages: List[Dict[str, str]], api_key: str, system_text: str) -> Optional[str]:
+def call_deepseek(messages: list[dict[str, str]], api_key: str, system_text: str) -> Optional[str]:
     url = "https://api.deepseek.com/v1/chat/completions"
     body = {"model": DEEPSEEK_MODEL, "messages": [{"role": "system", "content": system_text}] + messages}
     res = requests.post(url, json=body, headers={"Authorization": f"Bearer {api_key}"}, timeout=60)
@@ -844,7 +855,7 @@ def call_deepseek(messages: List[Dict[str, str]], api_key: str, system_text: str
     return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip() or None
 
 
-def build_contents(history: List[Dict[str, str]], message: str) -> List[Dict[str, Any]]:
+def build_contents(history: list[dict[str, str]], message: str) -> list[dict[str, Any]]:
     legacy = re.compile(r"\b(jobai|job search|job listings|application status|resume)\b", re.I)
     if any(legacy.search(m.get("content", "")) for m in history):
         history = []
@@ -857,22 +868,22 @@ def build_contents(history: List[Dict[str, str]], message: str) -> List[Dict[str
     parts.append({"role": "user", "parts": [{"text": message.strip()}]})
     return parts
 
-
+@dataclass
 class ChatRequest(BaseModel):
-    message: str
-    messages: Optional[List[Dict[str, str]]] = None
+    message: str = ''
+    messages: Optional[list[dict[str, str]]] = None
     apiKey: Optional[str] = None
     llmProvider: Optional[str] = None
 
-
+@dataclass
 class GameActionRequest(BaseModel):
-    action: str
+    action: str = ''
     guess_lat: Optional[float] = None
     guess_lon: Optional[float] = None
 
-
+@dataclass
 class AgentObservationRequest(BaseModel):
-    command: str
+    command: str = ''
     screenshot: Optional[str] = None
     screenshot_url: Optional[str] = None
     maps_api_key: Optional[str] = None
@@ -1060,16 +1071,16 @@ async def on_startup() -> None:
 async def start_agent():
     from graphs.agent_runner import run_langgraph_agent, _PIPELINE_STEPS
     async with AGENT_LOCK:
-        if AGENT_STATE["running"]:
+        if AGENT_STATE.running:
             return await _agent_snapshot()
         game = _build_game_state()
-        AGENT_STATE["running"] = True
-        AGENT_STATE["stop"] = False
-        AGENT_STATE["error"] = None
-        AGENT_STATE["game"] = game
-        AGENT_STATE["steps"] = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in _PIPELINE_STEPS]
-        AGENT_STATE["last_observation"] = None
-        AGENT_STATE["captured_images"] = []
+        AGENT_STATE.running = True
+        AGENT_STATE.stop = False
+        AGENT_STATE.error = None
+        AGENT_STATE.game = game
+        AGENT_STATE.steps = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in _PIPELINE_STEPS]
+        AGENT_STATE.last_observation = None
+        AGENT_STATE.captured_images = []
 
     # Fetch initial frame for immediate display, then kick off the pipeline
     await _agent_refresh_frame()
@@ -1090,13 +1101,13 @@ async def start_agent():
 @app.post("/api/agent/stop")
 async def stop_agent():
     async with AGENT_LOCK:
-        AGENT_STATE["stop"] = True
-        AGENT_STATE["running"] = False
-        AGENT_STATE["pending_command"] = None
-        AGENT_STATE["steps"] = []
-        AGENT_STATE["last_observation"] = None
-        AGENT_STATE["last_action"] = None
-        AGENT_STATE["captured_images"] = []
+        AGENT_STATE.stop = True
+        AGENT_STATE.running = False
+        AGENT_STATE.pending_command = None
+        AGENT_STATE.steps = []
+        AGENT_STATE.last_observation = None
+        AGENT_STATE.last_action = None
+        AGENT_STATE.captured_images = []
     return await _agent_snapshot()
 
 
@@ -1104,9 +1115,9 @@ async def stop_agent():
 async def agent_next_command():
     async with AGENT_LOCK:
         return {
-            "running": bool(AGENT_STATE["running"]),
-            "command": AGENT_STATE.get("pending_command"),
-            "command_seq": int(AGENT_STATE.get("command_seq") or 0),
+            "running": bool(AGENT_STATE.running),
+            "command": AGENT_STATE.pending_command,
+            "command_seq": int(AGENT_STATE.command_seq or 0),
         }
 
 
@@ -1117,8 +1128,8 @@ async def agent_observation(body: AgentObservationRequest):
         raise HTTPException(status_code=400, detail="command required")
 
     async with AGENT_LOCK:
-        running = bool(AGENT_STATE["running"])
-        pending = AGENT_STATE.get("pending_command")
+        running = bool(AGENT_STATE.running)
+        pending = AGENT_STATE.pending_command
     if not running:
         raise HTTPException(status_code=409, detail="agent is not running")
     if pending != command:
@@ -1126,7 +1137,7 @@ async def agent_observation(body: AgentObservationRequest):
 
     capture_debug: Optional[str] = None
     async with AGENT_LOCK:
-        game = dict(AGENT_STATE.get("game") or {})
+        game = dict(AGENT_STATE.game or {})
         if body.view_lat is not None:
             game["view_lat"] = float(max(-85.0, min(85.0, body.view_lat)))
         if body.view_lon is not None:
@@ -1137,19 +1148,19 @@ async def agent_observation(body: AgentObservationRequest):
             game["guess_lat"] = float(max(-85.0, min(85.0, body.guess_lat)))
         if body.guess_lon is not None:
             game["guess_lon"] = float(max(-180.0, min(180.0, body.guess_lon)))
-        AGENT_STATE["game"] = game
-        last_observation: Dict[str, Any] = {
+        AGENT_STATE.game = game
+        last_observation: dict[str, Any] = {
             "command": command,
-            "received_at": datetime.utcnow().isoformat(),
+            "received_at": datetime.now(UTC).isoformat(),
             "has_screenshot": bool(body.screenshot),
             "has_screenshot_url": bool(body.screenshot_url),
             "error": body.error,
         }
-        AGENT_STATE["last_observation"] = last_observation
+        AGENT_STATE.last_observation = last_observation
         if command == "capture" and body.screenshot:
             parsed = _parse_data_url_image(body.screenshot)
             if parsed:
-                images = list(AGENT_STATE.get("captured_images") or [])
+                images = list(AGENT_STATE.captured_images or [])
                 image_id = f"cap-{int(time.time() * 1000)}"
                 saved_url = _persist_capture_image(image_id, parsed["mime"], parsed["data"])
                 images.append(
@@ -1162,7 +1173,7 @@ async def agent_observation(body: AgentObservationRequest):
                         "saved_url": saved_url,
                     }
                 )
-                AGENT_STATE["captured_images"] = images[-8:]
+                AGENT_STATE.captured_images = images[-8:]
                 capture_debug = (
                     f"stored_data_url mime={parsed['mime']} bytes={len(parsed['data'])}"
                     + (f" saved={saved_url}" if saved_url else " saved=write_failed")
@@ -1181,7 +1192,7 @@ async def agent_observation(body: AgentObservationRequest):
                     body.maps_api_key,
                 )
             if captured:
-                images = list(AGENT_STATE.get("captured_images") or [])
+                images = list(AGENT_STATE.captured_images or [])
                 image_id = f"cap-{int(time.time() * 1000)}"
                 saved_url = _persist_capture_image(image_id, captured["mime"], captured["data"])
                 images.append(
@@ -1194,7 +1205,7 @@ async def agent_observation(body: AgentObservationRequest):
                         "saved_url": saved_url,
                     }
                 )
-                AGENT_STATE["captured_images"] = images[-8:]
+                AGENT_STATE.captured_images = images[-8:]
                 capture_debug = (
                     f"stored_backend_view mime={captured['mime']} bytes={len(captured['data'])}"
                     + (f" saved={saved_url}" if saved_url else " saved=write_failed")
@@ -1202,7 +1213,7 @@ async def agent_observation(body: AgentObservationRequest):
             else:
                 capture_debug = "missing_frontend_screenshot_and_backend_view_failed"
         if command == "capture":
-            AGENT_STATE["last_observation"]["capture_debug"] = capture_debug
+            AGENT_STATE.last_observation["capture_debug"] = capture_debug
 
     # Frontend already performs visual rotation and reports resulting POV.
     # Avoid applying additional backend-side rotate deltas which cause jumpy motion.
@@ -1229,7 +1240,7 @@ async def agent_observation(body: AgentObservationRequest):
     elif command == "guess":
         await _set_pending_command(None)
         async with AGENT_LOCK:
-            AGENT_STATE["running"] = False
+            AGENT_STATE.running = False
 
     await _agent_refresh_frame()
     return await _agent_snapshot()
@@ -1238,14 +1249,14 @@ async def agent_observation(body: AgentObservationRequest):
 @app.post("/api/game/start")
 async def game_start():
     async with AGENT_LOCK:
-        AGENT_STATE["game"] = _build_game_state()
-        AGENT_STATE["error"] = None
-        AGENT_STATE["running"] = False
-        AGENT_STATE["pending_command"] = None
-        AGENT_STATE["steps"] = []
-        AGENT_STATE["last_observation"] = None
-        AGENT_STATE["last_action"] = None
-        AGENT_STATE["captured_images"] = []
+        AGENT_STATE.game = _build_game_state()
+        AGENT_STATE.error = None
+        AGENT_STATE.running = False
+        AGENT_STATE.pending_command = None
+        AGENT_STATE.steps = []
+        AGENT_STATE.last_observation = None
+        AGENT_STATE.last_action = None
+        AGENT_STATE.captured_images = []
     await _agent_refresh_frame()
     return await _agent_snapshot()
 
@@ -1253,7 +1264,7 @@ async def game_start():
 @app.get("/api/game/state")
 async def game_state():
     async with AGENT_LOCK:
-        game = dict(AGENT_STATE.get("game") or {})
+        game = dict(AGENT_STATE.game or {})
     return {"ok": bool(game), "game": game}
 
 
@@ -1265,12 +1276,12 @@ async def game_action(body: GameActionRequest):
         raise HTTPException(status_code=400, detail=f"unsupported action: {action}")
     if action == "guess" and (body.guess_lat is not None or body.guess_lon is not None):
         async with AGENT_LOCK:
-            game = dict(AGENT_STATE.get("game") or {})
+            game = dict(AGENT_STATE.game or {})
             if body.guess_lat is not None:
                 game["guess_lat"] = float(max(-85.0, min(85.0, body.guess_lat)))
             if body.guess_lon is not None:
                 game["guess_lon"] = float(max(-180.0, min(180.0, body.guess_lon)))
-            AGENT_STATE["game"] = game
+            AGENT_STATE.game = game
     await _apply_agent_action(action)
     await _agent_set_action(action)
     return await _agent_snapshot()
@@ -1285,16 +1296,16 @@ async def agent_status():
 async def agent_frame():
     _start_agent_thread()
     async with AGENT_LOCK:
-        has_frame = bool(AGENT_STATE.get("frame"))
+        has_frame = bool(AGENT_STATE.frame)
     if not has_frame:
         await _agent_refresh_frame()
     async with AGENT_LOCK:
-        frame = AGENT_STATE.get("frame")
-        frame_mime = AGENT_STATE.get("frame_mime") or "image/svg+xml"
-        error = AGENT_STATE.get("error")
-        last_action = AGENT_STATE.get("last_action")
-        last_frame_at = AGENT_STATE.get("last_frame_at")
-        game = dict(AGENT_STATE.get("game") or {})
+        frame = AGENT_STATE.frame
+        frame_mime = AGENT_STATE.frame_mime or "image/svg+xml"
+        error = AGENT_STATE.error
+        last_action = AGENT_STATE.last_action
+        last_frame_at = AGENT_STATE.last_frame_at
+        game = dict(AGENT_STATE.game or {})
     return {
         "ok": bool(frame),
         "frame": frame,
@@ -1379,7 +1390,7 @@ def chat(req: ChatRequest, request: Request):
 
     return {
         "reply": reply,
-        "questionList": question_list,
+        "questionlist": question_list,
         "styleUpdate": style_update,
         "pdfUrl": pdf_url,
     }
@@ -1410,7 +1421,7 @@ def get_gemini_key(request: Request):
 
 
 @app.put("/api/user/gemini-key")
-def put_gemini_key(request: Request, body: Dict[str, Any]):
+def put_gemini_key(request: Request, body: dict[str, Any]):
     user_id = get_user_id(request)
     api_key = (body.get("apiKey") or "").strip()
     if not api_key:
@@ -1497,7 +1508,7 @@ def get_deepseek_key(request: Request):
 
 
 @app.put("/api/user/deepseek-key")
-def put_deepseek_key(request: Request, body: Dict[str, Any]):
+def put_deepseek_key(request: Request, body: dict[str, Any]):
     user_id = get_user_id(request)
     api_key = (body.get("apiKey") or "").strip()
     if not api_key:
@@ -1532,7 +1543,7 @@ def get_llm_provider(request: Request):
 
 
 @app.put("/api/user/llm-provider")
-def put_llm_provider(request: Request, body: Dict[str, Any]):
+def put_llm_provider(request: Request, body: dict[str, Any]):
     user_id = get_user_id(request)
     provider = (body.get("provider") or "gemini").strip()
     if provider not in ("gemini", "deepseek"):
@@ -1580,7 +1591,7 @@ def get_chat(request: Request):
 
 
 @app.post("/api/user/chat")
-def save_chat(request: Request, body: Dict[str, Any]):
+def save_chat(request: Request, body: dict[str, Any]):
     user_id = get_user_id(request)
     messages = body.get("messages")
     if not isinstance(messages, list):
@@ -1621,7 +1632,7 @@ def get_links(request: Request):
 
 
 @app.put("/api/user/links")
-def put_links(request: Request, body: Dict[str, Any]):
+def put_links(request: Request, body: dict[str, Any]):
     user_id = get_user_id(request)
     links = body.get("links")
     if not isinstance(links, list):
