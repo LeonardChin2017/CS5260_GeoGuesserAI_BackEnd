@@ -198,7 +198,6 @@ def client():
 MOCK_GUESS_RESULT = {
     "belief_state": [{"country": "Japan", "lat": 35.6595, "lon": 139.7005, "confidence": 0.9, "evidence": "Japanese text"}],
     "action": {"type": "GUESS", "lat": 35.6595, "lon": 139.7005},
-    "action_history": [{"type": "GUESS", "lat": 35.6595, "lon": 139.7005}],
     "final_guess": {"lat": 35.6595, "lon": 139.7005, "country": "Japan", "confidence": 0.9},
     "specialist_outputs": {},
     "iteration": 1,
@@ -208,7 +207,6 @@ MOCK_GUESS_RESULT = {
 MOCK_ROTATE_RESULT = {
     "belief_state": [{"country": "Unknown", "lat": 0.0, "lon": 0.0, "confidence": 0.2, "evidence": "unclear"}],
     "action": {"type": "ROTATE", "degrees": 90},
-    "action_history": [{"type": "ROTATE", "degrees": 90}],
     "final_guess": None,
     "specialist_outputs": {},
     "iteration": 1,
@@ -295,7 +293,7 @@ def test_run_endpoint_response_shape(client):
             "start_lon": 0.0,
         })
     data = r.json()
-    for key in ["final_guess", "belief_state", "action_history", "iterations_used", "final_view"]:
+    for key in ["final_guess", "belief_state", "iterations_used", "final_view"]:
         assert key in data, f"Missing key: {key}"
 
 

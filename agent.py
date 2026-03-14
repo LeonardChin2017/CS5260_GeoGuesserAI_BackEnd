@@ -48,7 +48,6 @@ class Agent:
             "specialist_outputs": {},  # fresh each iteration TODO keep some information across iteration
             "belief_state": self.belief_state,
             "action": {},
-            "action_history": self.action_history,
             "final_guess": None,
             "error": None,
         }

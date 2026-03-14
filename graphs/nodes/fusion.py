@@ -133,13 +133,9 @@ def _build_state_update(result: dict, state: GeoState, iteration: int, forced: b
             "country": belief_state[0].get("country") if belief_state else None,
             "confidence": belief_state[0].get("confidence", 0.0) if belief_state else 0.0,
         }
-
-    history = list(state.get("action_history", [])) + [action]
-
     return {
         "belief_state": belief_state,
         "action": action,
-        "action_history": history,
         "final_guess": final_guess,
         "iteration": iteration + 1,
         "error": None,
@@ -185,11 +181,9 @@ def _forced_guess(state: GeoState, specialist_outputs: dict, iteration: int) -> 
         "confidence": top.get("confidence", 0.0),
         "forced": True,
     }
-    history = list(state.get("action_history", [])) + [action]
     return {
         "belief_state": existing_belief,
         "action": action,
-        "action_history": history,
         "final_guess": final_guess,
         "iteration": iteration + 1,
         "error": None,
@@ -199,11 +193,9 @@ def _forced_guess(state: GeoState, specialist_outputs: dict, iteration: int) -> 
 def _error_fallback(state: GeoState, iteration: int, error_msg: str) -> dict:
     """Return a safe fallback state when fusion fails."""
     action = {"type": "GUESS", "lat": 0.0, "lon": 0.0}
-    history = list(state.get("action_history", [])) + [action]
     return {
         "belief_state": [],
         "action": action,
-        "action_history": history,
         "final_guess": {"lat": 0.0, "lon": 0.0, "country": None, "confidence": 0.0},
         "iteration": iteration + 1,
         "error": f"Fusion failed: {error_msg}",

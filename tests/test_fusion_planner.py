@@ -140,7 +140,6 @@ def _make_state(iteration=0, max_iterations=5, specialists=None, belief_state=No
         specialist_outputs=specialists or HIGH_CONFIDENCE_SPECIALISTS,
         belief_state=belief_state or [],
         action={},
-        action_history=[],
         final_guess=None,
         error=None,
     )
@@ -200,15 +199,6 @@ def test_fusion_belief_state_has_required_fields():
     for entry in result["belief_state"]:
         for field in ["country", "lat", "lon", "confidence", "evidence"]:
             assert field in entry, f"Missing '{field}' in belief_state entry"
-
-
-def test_fusion_action_history_appended():
-    from graphs.nodes.fusion import fusion_planner_node
-    state = _make_state()
-    state["action_history"] = [{"type": "ROTATE", "degrees": 90}]
-    with patch("graphs.nodes.fusion.call_gemini_vision", return_value=MOCK_FUSION_GUESS):
-        result = fusion_planner_node(state)
-    assert len(result["action_history"]) == 2
 
 
 def test_fusion_iteration_increments():

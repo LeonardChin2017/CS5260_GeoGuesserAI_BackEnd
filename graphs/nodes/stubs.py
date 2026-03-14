@@ -105,12 +105,9 @@ def fusion_planner_stub(state: GeoState) -> dict:
         }
     ]
 
-    history = list(state.get("action_history", [])) + [action]
-
     return {
         "belief_state": belief_state,
         "action": action,
-        "action_history": history,
         "final_guess": final_guess,
         "iteration": iteration + 1,
     }

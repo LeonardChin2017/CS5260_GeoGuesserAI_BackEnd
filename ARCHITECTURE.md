@@ -77,7 +77,6 @@ class GeoState(TypedDict):
     specialist_outputs: Annotated[dict, _merge_dicts]  # merged by parallel reducer
     belief_state: list            # ranked candidate locations [{country, lat, lon, confidence, evidence}]
     action: dict                  # {type: GUESS|ROTATE|MOVE, ...}
-    action_history: list          # all actions taken so far
     final_guess: Optional[dict]   # set when committing a GUESS
     error: Optional[str]          # error from any node
 ```

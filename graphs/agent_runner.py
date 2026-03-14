@@ -137,7 +137,6 @@ async def run_langgraph_agent(
 
     view = GameView(start_lat, start_lon, start_heading)
     belief_state: list = []
-    action_history: list = []
 
     async with agent_lock:
         _set_steps({"capture": "running"})
@@ -201,7 +200,6 @@ async def run_langgraph_agent(
                 specialist_outputs={},
                 belief_state=belief_state,
                 action={"type": "GUESS"},
-                action_history=action_history,
                 final_guess=None,
                 error=None,
             )
@@ -217,7 +215,6 @@ async def run_langgraph_agent(
                 return
 
             belief_state = result.get("belief_state") or []
-            action_history = result.get("action_history") or []
             action = result.get("action") or {"type": "GUESS"}
             specialist_outputs = result.get("specialist_outputs") or {}
 

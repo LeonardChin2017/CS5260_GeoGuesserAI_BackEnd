@@ -76,7 +76,6 @@ def test_state_schema_all_keys():
         "specialist_outputs": {},
         "belief_state": [],
         "action": {},
-        "action_history": [],
         "final_guess": None,
         "error": None,
     }
@@ -99,7 +98,6 @@ def _base_state():
         specialist_outputs={},
         belief_state=[],
         action={},
-        action_history=[],
         final_guess=None,
         error=None,
     )
@@ -149,7 +147,6 @@ def test_graph_runs_end_to_end():
     result = geo_graph.invoke(_base_state())
     assert "action" in result
     assert "belief_state" in result
-    assert "action_history" in result
     assert "specialist_outputs" in result
 
 
@@ -192,12 +189,6 @@ def test_graph_explore_decision_when_mocked():
     assert result["final_guess"] is None
 
 
-def test_graph_action_history_grows():
-    from graphs.geoguessr_graph import geo_graph
-    result = geo_graph.invoke(_base_state())
-    assert len(result["action_history"]) >= 1
-
-
 # ---------------------------------------------------------------------------
 # 4. API endpoint — /api/agent/analyze
 # ---------------------------------------------------------------------------
@@ -222,7 +213,7 @@ def test_analyze_endpoint_returns_200(client):
 def test_analyze_endpoint_response_shape(client):
     r = client.post("/api/agent/analyze", json={"screenshot": MOCK_B64, "max_iterations": 5})
     data = r.json()
-    for key in ["belief_state", "action", "action_history", "specialist_outputs", "iteration"]:
+    for key in ["belief_state", "action", "specialist_outputs", "iteration"]:
         assert key in data, f"Missing key '{key}' in response"
 
 

@@ -31,9 +31,6 @@ class GeoState(TypedDict):
     # The next action to take
     action: dict
 
-    # Full history of actions taken so far TODO delete
-    action_history: list
-
     # Set when the agent commits a final guess
     final_guess: Optional[dict]
 

@@ -48,7 +48,6 @@ def _base_state():
         specialist_outputs={},
         belief_state=[],
         action={},
-        action_history=[],
         final_guess=None,
         error=None,
     )

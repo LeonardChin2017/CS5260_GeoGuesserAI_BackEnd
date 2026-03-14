@@ -480,7 +480,7 @@ class AnalyzeRequest(BaseModel):
 async def agent_analyze(req: AnalyzeRequest):
     """
     Single-iteration: run the LangGraph pipeline on one screenshot.
-    Returns belief_state, action, action_history, final_guess.
+    Returns belief_state, action, final_guess.
     Useful for debugging individual iterations.
     """
     initial_state: GeoState = {
@@ -490,7 +490,6 @@ async def agent_analyze(req: AnalyzeRequest):
         "specialist_outputs": {},
         "belief_state": [],
         "action": {},
-        "action_history": [],
         "final_guess": None,
         "error": None,
     }
@@ -499,7 +498,6 @@ async def agent_analyze(req: AnalyzeRequest):
         return {
             "belief_state": result.get("belief_state", []),
             "action": result.get("action", {}),
-            "action_history": result.get("action_history", []),
             "final_guess": result.get("final_guess"),
             "specialist_outputs": result.get("specialist_outputs", {}),
             "iteration": result.get("iteration", 0),
@@ -534,7 +532,6 @@ async def agent_run(req: RunRequest):
     screenshot = req.screenshot
 
     belief_state: list = []
-    action_history: list = []
     result: dict = {}
     errors: list = []
 
@@ -546,7 +543,6 @@ async def agent_run(req: RunRequest):
             "specialist_outputs": {},  # fresh each iteration
             "belief_state": belief_state,  # carry forward
             "action": {},
-            "action_history": action_history,
             "final_guess": None,
             "error": None,
         }
@@ -557,7 +553,6 @@ async def agent_run(req: RunRequest):
             raise HTTPException(status_code=500, detail=f"Graph error at iteration {iteration}: {e}")
 
         belief_state = result.get("belief_state", belief_state)
-        action_history = result.get("action_history", action_history)
         action = result.get("action", {})
 
         if result.get("error"):
@@ -581,7 +576,6 @@ async def agent_run(req: RunRequest):
     return {
         "final_guess": result.get("final_guess"),
         "belief_state": result.get("belief_state", []),
-        "action_history": action_history,
         "iterations_used": result.get("iteration", 0),
         "final_view": view.to_dict(),
         "errors": errors if errors else None,
