@@ -20,7 +20,7 @@ import time
 from datetime import datetime, UTC
 from typing import Any, Dict
 
-from app import AgentState, Game
+from app import AgentState, GameState
 from graphs.action_executor import GameView, execute_action, fetch_streetview_screenshot
 from graphs.geoguessr_graph import geo_graph
 from graphs.state import GeoState
@@ -111,7 +111,7 @@ async def run_langgraph_agent(
 
     def _update_game_from_result(result: Dict[str, Any], view: GameView) -> None:
         """Push LangGraph result fields back into agent_state.game."""
-        game: Game = Game() if agent_state.game is None else agent_state.game
+        game: GameState = GameState() if agent_state.game is None else agent_state.game
         game.view_lat = view.lat
         game.view_lon = view.lon
         game.heading = view.heading
@@ -258,7 +258,7 @@ async def run_langgraph_agent(
             # ----------------------------------------------------------------
             if action.get("type") == "GUESS":
                 async with agent_lock:
-                    game: Game = Game() if agent_state.game is None else agent_state.game
+                    game: GameState = GameState() if agent_state.game is None else agent_state.game
                     final = result.get("final_guess") or {}
                     if final:
                         game.guess_lat = float(final.get("lat", _0_if_nan(game.guess_lat)))

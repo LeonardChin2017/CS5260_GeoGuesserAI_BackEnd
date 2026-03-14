@@ -15,12 +15,10 @@ from typing import Any, Optional
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from graphs.agent_runner import run_langgraph_agent, _PIPELINE_STEPS
-from util import _0_if_nan
+from util import _0_if_nan, log_debug
 
 load_dotenv()
 
@@ -39,21 +37,15 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "WARNING").upper()
-logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger("GGSolver")
+
 CAPTURE_PIPELINE_VERSION = "capture-v3-ext-sniff"
-
-
-def log_debug(s: str):
-    logger.debug(s)
 
 
 AGENT_LOCK = asyncio.Lock()
 
 
 @dataclass
-class Game:
+class GameState:
     heading: float = nan
     view_lon: float = nan
     view_lat: float = nan
@@ -80,7 +72,7 @@ class AgentState:
     error: Optional[str] = None
     last_action: Optional[str] = None
     last_frame_at: Optional[str] = None
-    game: Optional[Game] = None
+    game: Optional[GameState] = None
     pending_command: Optional[str] = None
     command_seq: int = 0
     last_observation: Optional[dict[str, Any]] = None
@@ -139,7 +131,7 @@ async def _agent_snapshot() -> dict[str, Any]:
     log_debug("agent_snapshot called")
     async with AGENT_LOCK:
         steps: list[dict[str, Any]] = [dict(step) for step in AGENT_STATE.steps]
-        game: Optional[dict[str, Any]] = asdict(AGENT_STATE.game) if isinstance(AGENT_STATE.game, Game) else None
+        game: Optional[dict[str, Any]] = asdict(AGENT_STATE.game) if isinstance(AGENT_STATE.game, GameState) else None
         captured_images: list[dict[str, Any]] = [dict(img) for img in (AGENT_STATE.captured_images or [])]
         return {
             "running": bool(AGENT_STATE.running),
@@ -291,43 +283,9 @@ async def _set_pending_command(command: Optional[str]) -> None:
         AGENT_STATE.command_seq = int(AGENT_STATE.command_seq or 0) + 1
 
 
-def _wrap_heading(degrees: float) -> float:
-    while degrees < 0:
-        degrees += 360
-    while degrees >= 360:
-        degrees -= 360
-    return degrees
-
-
-def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    # Fast equirectangular approximation is sufficient for game scoring.
-    lat1r = lat1 * 0.017453292519943295
-    lat2r = lat2 * 0.017453292519943295
-    lon1r = lon1 * 0.017453292519943295
-    lon2r = lon2 * 0.017453292519943295
-    x = (lon2r - lon1r) * max(0.1, abs((lat1r + lat2r) / 2.0))
-    y = lat2r - lat1r
-    return (x * x + y * y) ** 0.5 * 6371.0
-
-
-def _score_from_distance(distance_km: float) -> int:
-    score = int(max(0.0, 5000.0 - (distance_km * 4.0)))
-    return score
-
-
-def _escape_svg_text(raw: str) -> str:
-    return (
-        raw.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("'", "&#39;")
-    )
-
-
-def _build_game_state() -> Game:
+def _build_game_state() -> GameState:
     target = random.choice(GEO_LOCATIONS)
-    return Game(
+    return GameState(
         target_country=target["country"],
         target_lat=target["lat"],
         target_lon=target["lon"],
@@ -353,7 +311,7 @@ async def _mark_step_progress(step_index: int) -> None:
 
 async def _apply_agent_action(step_id: str) -> None:
     async with AGENT_LOCK:
-        game: Optional[Game] = AGENT_STATE.game
+        game: Optional[GameState] = AGENT_STATE.game
     if game is None:
         return
     if step_id == "rotate_left":
@@ -479,68 +437,6 @@ def _start_agent_thread() -> None:
     AGENT_TASK_STARTED = True
 
 
-# TODO consider del
-def read_prompt_file(file_name: str, fallback: str) -> str:
-    try:
-        content = (PROMPTS_DIR / file_name).read_text(encoding="utf-8")
-        cleaned = content.replace("\r\n", "\n").strip()
-        return cleaned or fallback
-    except Exception:
-        return fallback
-
-
-# TODO consider del
-def _decode_jwt_subject(token: str) -> Optional[str]:
-    parts = token.split(".")
-    if len(parts) < 2:
-        return None
-    payload = parts[1]
-    pad = "=" * (-len(payload) % 4)
-    try:
-        data = base64.urlsafe_b64decode(payload + pad)
-        parsed = json.loads(data.decode("utf-8"))
-        sub = parsed.get("sub")
-        return sub if isinstance(sub, str) and sub.strip() else None
-    except Exception:
-        return None
-
-
-def log_event(message: str) -> None:
-    logger.info(message)
-    print(message, flush=True)
-
-
-# TODO consider del
-def strip_markdown(text: str) -> str:
-    return re.sub(r"^#+\s*", "", re.sub(r"\*([^*]+)\*", r"\1", text, flags=re.M)).strip()
-
-
-# TODO consider del
-def call_gemini(contents: list[dict[str, Any]], api_key: str, system_text: str) -> Optional[str]:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
-    body = {"systemInstruction": {"parts": [{"text": system_text}]}, "contents": contents}
-    res = requests.post(url, json=body, timeout=60)
-    if not res.ok:
-        return None
-    data = res.json()
-    parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-    for part in parts:
-        if "text" in part and part["text"]:
-            return part["text"].strip()
-    return None
-
-
-# TODO consider del
-def call_deepseek(messages: list[dict[str, str]], api_key: str, system_text: str) -> Optional[str]:
-    url = "https://api.deepseek.com/v1/chat/completions"
-    body = {"model": DEEPSEEK_MODEL, "messages": [{"role": "system", "content": system_text}] + messages}
-    res = requests.post(url, json=body, headers={"Authorization": f"Bearer {api_key}"}, timeout=60)
-    if not res.ok:
-        return None
-    data = res.json()
-    return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip() or None
-
-
 @dataclass
 class GameActionRequest(BaseModel):
     action: str = ''
@@ -563,14 +459,6 @@ class AgentObservationRequest(BaseModel):
 
 
 app = FastAPI()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-app.mount("/captured_images", StaticFiles(directory=CAPTURED_IMAGES_DIR), name="captured_images")
 
 
 @app.get("/")
@@ -738,7 +626,7 @@ async def start_agent():
     async with AGENT_LOCK:
         if AGENT_STATE.running:
             return await _agent_snapshot()
-        game: Game = _build_game_state()
+        game: GameState = _build_game_state()
         AGENT_STATE.running = True
         AGENT_STATE.stop = False
         AGENT_STATE.error = None
@@ -799,7 +687,7 @@ async def agent_observation(body: AgentObservationRequest):
 
     capture_debug: Optional[str] = None
     async with AGENT_LOCK:
-        game: Game = Game() if AGENT_STATE.game is None else AGENT_STATE.game
+        game: GameState = GameState() if AGENT_STATE.game is None else AGENT_STATE.game
         if body.view_lat is not None:
             game.view_lat = float(max(-85.0, min(85.0, body.view_lat)))
         if body.view_lon is not None:
@@ -894,7 +782,7 @@ async def game_start():
 @app.get("/api/game/state")
 async def game_state():
     async with AGENT_LOCK:
-        game: Game = Game() if AGENT_STATE.game is None else AGENT_STATE.game
+        game: GameState = GameState() if AGENT_STATE.game is None else AGENT_STATE.game
     return {"ok": bool(game), "game": asdict(game)}
 
 
@@ -906,7 +794,7 @@ async def game_action(body: GameActionRequest):
         raise HTTPException(status_code=400, detail=f"unsupported action: {action}")
     if action == "guess" and (body.guess_lat is not None or body.guess_lon is not None):
         async with AGENT_LOCK:
-            game: Game = Game() if AGENT_STATE.game is None else AGENT_STATE.game
+            game: GameState = GameState() if AGENT_STATE.game is None else AGENT_STATE.game
             if body.guess_lat is not None:
                 game.guess_lat = max(-85.0, min(85.0, body.guess_lat))
             if body.guess_lon is not None:
@@ -931,7 +819,7 @@ async def agent_frame():
         error = AGENT_STATE.error
         last_action = AGENT_STATE.last_action
         last_frame_at = AGENT_STATE.last_frame_at
-        game: Game = Game() if AGENT_STATE.game is None else AGENT_STATE.game
+        game: GameState = GameState() if AGENT_STATE.game is None else AGENT_STATE.game
     return {
         "ok": bool(frame),
         "frame": frame,

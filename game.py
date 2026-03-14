@@ -1,11 +1,12 @@
 import os
-import random
 from dataclasses import dataclass
 from math import nan
 
 import requests
 from dotenv import load_dotenv
 from pyproj import Geod
+
+from util import log_event
 
 GEO_LOCATIONS = [
     {"name": "Shibuya Crossing", "lat": 35.6595, "lon": 139.7005},
@@ -47,11 +48,8 @@ class Game:
         self.pick_random_street_view()
 
     def pick_random_street_view(self) -> None:
-        """
-        Pick a random known Street View seed location from a small built-in pool.
-        This mirrors the existing _build_game_state() logic.
-        """
-        target = random.choice(GEO_LOCATIONS)
+        """TODO pick randomly in the world"""
+        target = GEO_LOCATIONS[3]
         self._cur_lon = self._tar_lon = target["lon"]
         self._cur_lat = self._tar_lat = target["lat"]
 
@@ -71,7 +69,7 @@ class Game:
     def render_image(self, size: str = "1920x1280", timeout: int = 20) -> StreetViewImage:
         """ Fetch the image of current Street View"""
         url: str = self._street_view_url(size=size)
-        print(url)
+        log_event(f"Fetching {url}")
         res = requests.get(url, timeout=timeout)
         res.raise_for_status()
 
@@ -98,6 +96,8 @@ class Game:
         This is only a rough geographic step, not true Street View graph navigation.
         Real Street View movement should use pano links / metadata if you want
         authentic GeoGuessr-like movement.
+
+        TODO prevent moving to places having no street view
         """
         if distance_m == 0:
             return
@@ -105,12 +105,10 @@ class Game:
         self._cur_lon = ((new_lon + 180) % 360) - 180
         self._cur_lat = new_lat
 
-    def score(self, lat: float, lon: float) -> int:
-        """
-        WGS84 geodesic distance in kilometers.
-        """
+    def guess(self, lat: float, lon: float) -> float:
+        """ WGS84 geodesic distance in kilometers. """
         distance_m: float = _WGS84_GEOD.inv(lon, lat, self._tar_lon, self._tar_lat)[2]
-        return max(0, 5000 - round(distance_m / 1000))  # TODO improve scoring function
+        return round(distance_m / 1000, 3)
 
 
 if __name__ == "__main__":
@@ -121,4 +119,4 @@ if __name__ == "__main__":
     print(game._street_view_url())
     game.turn(delta_yaw=45.0, delta_pitch=10.0)
     print(game._street_view_url())
-    print(game.score(1.3521, 103.8198))
+    print(f"{game.guess(1.3521, 103.8198)}km")

@@ -19,6 +19,7 @@ import os
 
 from graphs.nodes.gemini_vision import call_gemini_vision, parse_json_response
 from graphs.state import GeoState
+from util import log_event
 
 # Confidence threshold to commit a guess without exhausting the iteration budget
 CONFIDENCE_THRESHOLD = 0.75
@@ -101,6 +102,7 @@ def fusion_planner_node(state: GeoState) -> dict:
             screenshot=state["screenshot"],
             api_key=os.getenv("GEMINI_API_KEY", ""),
         )
+        log_event(f"fusion result:\n{raw}")
         result = parse_json_response(raw)
         return _build_state_update(result, state, iteration, forced=False)
 

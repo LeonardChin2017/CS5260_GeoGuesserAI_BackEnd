@@ -9,6 +9,7 @@ import os
 
 from graphs.nodes.gemini_vision import call_gemini_vision, parse_json_response
 from graphs.state import GeoState
+from util import log_event
 
 # ---------------------------------------------------------------------------
 # Prompts — kept focused so the model returns clean, parseable JSON
@@ -110,6 +111,7 @@ def _run_specialist(agent_key: str, prompt: str, state: GeoState, fallback: dict
     """
     try:
         raw = call_gemini_vision(prompt, state["screenshot"], _get_api_key())
+        log_event(f"{agent_key} result:\n{raw}")
         output = parse_json_response(raw)
         # Ensure required fields are present
         output.setdefault("agent", agent_key)
