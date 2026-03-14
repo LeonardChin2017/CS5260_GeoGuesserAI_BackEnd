@@ -10,3 +10,4 @@ langchain-google-genai
 # Testing
 pytest
 httpx
+pydantic

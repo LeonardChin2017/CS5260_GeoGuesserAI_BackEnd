@@ -24,7 +24,7 @@ from app import AgentState, Game
 from graphs.action_executor import GameView, execute_action, fetch_streetview_screenshot
 from graphs.geoguessr_graph import geo_graph
 from graphs.state import GeoState
-from graphs.util import _0_if_nan
+from util import _0_if_nan
 
 _PIPELINE_STEPS = [
     ("capture",        "Capturing Street View frame"),

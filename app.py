@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
-from graphs.util import _0_if_nan
+from util import _0_if_nan
 
 load_dotenv()
 
@@ -528,7 +528,7 @@ async def _apply_agent_action(step_id: str) -> None:
         target_lon: float = game.target_lon
         if isnan(target_lat) or isnan(target_lon):
             game.final_distance_km = nan
-            game.score = 0
+            game.score = -1
         else:
             distance = _distance_km(
                 _0_if_nan(game.guess_lat),
