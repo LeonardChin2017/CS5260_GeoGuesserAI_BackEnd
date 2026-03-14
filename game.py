@@ -1,0 +1,124 @@
+import os
+import random
+from dataclasses import dataclass
+from math import nan
+
+import requests
+from dotenv import load_dotenv
+from pyproj import Geod
+
+GEO_LOCATIONS = [
+    {"name": "Shibuya Crossing", "lat": 35.6595, "lon": 139.7005},
+    {"name": "Copacabana", "lat": -22.9711, "lon": -43.1822},
+    {"name": "Table Mountain", "lat": -33.9628, "lon": 18.4098},
+    {"name": "Reykjavik Harbor", "lat": 64.1466, "lon": -21.9426},
+]
+
+_WGS84_GEOD = Geod(ellps="WGS84")
+
+
+def wrap_degrees(degrees: float) -> float:
+    while degrees < 0:
+        degrees += 360
+    while degrees >= 360:
+        degrees -= 360
+    return degrees
+
+
+def clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+@dataclass
+class StreetViewImage:
+    mime: str
+    data: bytes
+
+
+class Game:
+    def __init__(self):
+        self._tar_lon: float = nan
+        self._tar_lat: float = nan
+        self._cur_lon: float = nan  # degree
+        self._cur_lat: float = nan  # degree
+        self._pitch: float = 0.0  # degree
+        self.heading: float = 0.0  # degree, clockwise from true north
+        self.api_key: str = os.getenv("GOOGLE_MAPS_API_KEY")
+        self.pick_random_street_view()
+
+    def pick_random_street_view(self) -> None:
+        """
+        Pick a random known Street View seed location from a small built-in pool.
+        This mirrors the existing _build_game_state() logic.
+        """
+        target = random.choice(GEO_LOCATIONS)
+        self._cur_lon = self._tar_lon = target["lon"]
+        self._cur_lat = self._tar_lat = target["lat"]
+
+    def _street_view_url(self, size: str = "1920x1280", fov: float = 100) -> str:
+        if len(self.api_key) <= 0:
+            raise ValueError("Google Maps API key is required")
+        return (
+            "https://maps.googleapis.com/maps/api/streetview"
+            f"?size={size}"
+            f"&location={self._cur_lat},{self._cur_lon}"
+            f"&heading={self.heading}"
+            f"&pitch={self._pitch}"
+            f"&fov={fov}"
+            f"&key={self.api_key}"
+        )
+
+    def render_image(self, size: str = "1920x1280", timeout: int = 20) -> StreetViewImage:
+        """ Fetch the image of current Street View"""
+        url: str = self._street_view_url(size=size)
+        print(url)
+        res = requests.get(url, timeout=timeout)
+        res.raise_for_status()
+
+        content_type = (res.headers.get("content-type") or "").split(";")[0].strip().lower()
+        if not content_type.startswith("image/"):
+            raise ValueError(f"Street View API returned non-image content: {content_type}")
+
+        return StreetViewImage(mime=content_type, data=res.content)
+
+    def turn(self, delta_yaw: float = 0.0, delta_pitch: float = 0.0) -> None:
+        """
+        Turn camera in place.
+        Positive delta_yaw turns right.
+        Positive delta_pitch looks up.
+        """
+        self.heading = wrap_degrees(self.heading + delta_yaw)
+        self._pitch = clamp(self._pitch + delta_pitch, -90.0, 90.0)
+
+    def move_forward(self, distance_m: float = 20.0) -> None:
+        """
+        Approximate forward movement based on yaw.
+
+        Important:
+        This is only a rough geographic step, not true Street View graph navigation.
+        Real Street View movement should use pano links / metadata if you want
+        authentic GeoGuessr-like movement.
+        """
+        if distance_m == 0:
+            return
+        new_lon, new_lat, _ = _WGS84_GEOD.fwd(self._cur_lon, self._cur_lat, self.heading, distance_m)
+        self._cur_lon = ((new_lon + 180) % 360) - 180
+        self._cur_lat = new_lat
+
+    def score(self, lat: float, lon: float) -> int:
+        """
+        WGS84 geodesic distance in kilometers.
+        """
+        distance_m: float = _WGS84_GEOD.inv(lon, lat, self._tar_lon, self._tar_lat)[2]
+        return max(0, 5000 - round(distance_m / 1000))  # TODO improve scoring function
+
+
+if __name__ == "__main__":
+    load_dotenv()
+    game = Game()
+    print(game._street_view_url())
+    game.move_forward()
+    print(game._street_view_url())
+    game.turn(delta_yaw=45.0, delta_pitch=10.0)
+    print(game._street_view_url())
+    print(game.score(1.3521, 103.8198))
