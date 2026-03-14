@@ -18,8 +18,6 @@ The backend is a FastAPI application (`app.py`) that serves two purposes:
 | AI (chat) | Gemini or DeepSeek |
 | Graph pipeline | LangGraph (`StateGraph`) |
 | Street View frames | Google Maps Street View Static API |
-| DB (optional) | SQLite at `data/keys.db` |
-| PDF generation | ReportLab |
 
 ---
 
@@ -212,15 +210,6 @@ Module-level dict in `app.py`. Protected by `AGENT_LOCK` (asyncio.Lock). Key fie
 | `GET` | `/api/agent/next-command` | Frontend polls for next command to execute |
 | `POST` | `/api/agent/observation` | Frontend reports result of executing a command |
 
-### Chat (JobAI)
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/api/chat` | Generate exam questions via Gemini or DeepSeek |
-| `GET` | `/api/user/gemini-key` | Get/set/delete per-user Gemini key (Clerk auth) |
-| `GET` | `/api/user/deepseek-key` | Get/set/delete per-user DeepSeek key |
-| `GET/PUT` | `/api/user/llm-provider` | Get/set preferred LLM provider |
-| `GET/POST/DELETE` | `/api/user/chat` | Persist chat history |
 
 ---
 
@@ -262,6 +251,6 @@ AGENT_STEP_DELAY_MAX_SECONDS=  # Default: 1.8
 
 ## Known Limitations
 
-- **Gemini free tier**: `gemini-2.5-flash` has a 20 req/day free limit. Each agent run uses 6 calls (5 specialists + 1 fusion). Use `gemini-2.0-flash-lite` (1500 req/day) or enable billing.
+- **Loyalty**: Currently only support 1 concurrent client.
 - **Scoring formula**: Uses equirectangular approximation (not Haversine). Accurate enough for game scoring but not geodetically precise.
 - **No real GeoGuessr integration**: Targets are randomly selected from 4 built-in demo locations.
