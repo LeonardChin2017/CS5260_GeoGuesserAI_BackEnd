@@ -47,10 +47,6 @@ logger = logging.getLogger("jobai")
 CAPTURE_PIPELINE_VERSION = "capture-v3-ext-sniff"
 
 
-def log_debug(message: str) -> None:
-    """Debug logging disabled (no-op)."""
-    return
-
 AGENT_LOCK = asyncio.Lock()
 AGENT_STATE: Dict[str, Any] = {
     "running": False,
@@ -79,7 +75,6 @@ AGENT_STEP_SEQUENCE = [
     ("match", "Match clues to likely country"),
     ("guess", "Place guess and submit"),
 ]
-AGENT_COMMAND_FLOW = ["capture", "rotate_left", "rotate_right", "guess"]
 GEO_LOCATIONS = [
     {
         "name": "Shibuya Crossing",
@@ -113,7 +108,6 @@ GEO_LOCATIONS = [
 
 
 async def _agent_snapshot() -> Dict[str, Any]:
-    log_debug("agent_snapshot called")
     async with AGENT_LOCK:
         steps = [dict(step) for step in AGENT_STATE["steps"]]
         game = dict(AGENT_STATE["game"]) if isinstance(AGENT_STATE.get("game"), dict) else None
@@ -523,7 +517,6 @@ async def _apply_agent_action(step_id: str) -> None:
 
 
 async def _agent_worker() -> None:
-    log_debug("agent_worker started")
     min_delay = float(os.getenv("AGENT_STEP_DELAY_MIN_SECONDS", "0.8"))
     max_delay = float(os.getenv("AGENT_STEP_DELAY_MAX_SECONDS", "1.8"))
     steps_template = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in AGENT_STEP_SEQUENCE]
@@ -548,7 +541,6 @@ async def _agent_worker() -> None:
             cmd = None
 
         if cmd == "start":
-            log_debug("agent_worker received START command")
             await _agent_set_error(None)
             async with AGENT_LOCK:
                 AGENT_STATE["game"] = _build_game_state()
@@ -558,7 +550,6 @@ async def _agent_worker() -> None:
             await set_steps_for_start()
             await _agent_refresh_frame()
         elif cmd == "stop":
-            log_debug("agent_worker received STOP command")
             async with AGENT_LOCK:
                 AGENT_STATE["running"] = False
                 AGENT_STATE["stop"] = True
@@ -576,13 +567,11 @@ async def _agent_worker() -> None:
             elapsed = time.monotonic() - step_started_at
             if elapsed >= current_step_delay and current_step_index < len(AGENT_STEP_SEQUENCE):
                 sid, _ = AGENT_STEP_SEQUENCE[current_step_index]
-                log_debug(f"performing step {current_step_index} id={sid}")
                 try:
                     await _agent_set_action(sid)
                     await _apply_agent_action(sid)
                 except Exception as exc:
                     await _agent_set_error(f"Action failed: {exc}")
-                    log_debug(f"action {sid} failed: {exc}")
                 await _mark_step_progress(current_step_index)
                 current_step_index += 1
                 step_started_at = time.monotonic()
