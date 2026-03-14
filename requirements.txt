@@ -4,3 +4,9 @@ requests
 python-dotenv
 reportlab
 playwright
+# LangGraph agent pipeline
+langgraph
+langchain-google-genai
+# Testing
+pytest
+httpx

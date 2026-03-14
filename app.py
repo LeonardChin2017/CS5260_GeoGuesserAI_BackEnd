@@ -24,6 +24,10 @@ from reportlab.pdfgen import canvas
 
 load_dotenv()
 
+from graphs.geoguessr_graph import geo_graph
+from graphs.state import GeoState
+from graphs.action_executor import GameView, execute_action
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -43,10 +47,6 @@ logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message
 logger = logging.getLogger("jobai")
 CAPTURE_PIPELINE_VERSION = "capture-v3-ext-sniff"
 
-
-def log_debug(message: str) -> None:
-    """Debug logging disabled (no-op)."""
-    return
 
 AGENT_LOCK = asyncio.Lock()
 
@@ -81,7 +81,9 @@ AGENT_STEP_SEQUENCE: list[tuple[str, str]] = [
     ("match", "Match clues to likely country"),
     ("guess", "Place guess and submit"),
 ]
+
 AGENT_COMMAND_FLOW: list[str] = ["capture", "rotate_left", "rotate_right", "guess"]
+
 GEO_LOCATIONS = [
     {
         "name": "Shibuya Crossing",
@@ -116,6 +118,7 @@ GEO_LOCATIONS = [
 
 async def _agent_snapshot() -> dict[str, Any]:
     log_debug("agent_snapshot called")
+
     async with AGENT_LOCK:
         steps = [dict(step) for step in AGENT_STATE.steps]
         game = dict(AGENT_STATE.game) if isinstance(AGENT_STATE.game, dict) else None
@@ -505,21 +508,26 @@ async def _apply_agent_action(step_id: str) -> None:
         game["best_country_guess"] = game.get("target_country")
         game["confidence"] = min(0.99, float(game["confidence"]) + 0.15)
     elif step_id == "guess":
-        distance = _distance_km(
-            float(game["guess_lat"]),
-            float(game["guess_lon"]),
-            float(game["target_lat"]),
-            float(game["target_lon"]),
-        )
-        game["final_distance_km"] = distance
-        game["score"] = _score_from_distance(distance)
+        target_lat = game.get("target_lat")
+        target_lon = game.get("target_lon")
+        if target_lat is None or target_lon is None:
+            game["final_distance_km"] = None
+            game["score"] = 0
+        else:
+            distance = _distance_km(
+                float(game.get("guess_lat", 0.0)),
+                float(game.get("guess_lon", 0.0)),
+                float(target_lat),
+                float(target_lon),
+            )
+            game["final_distance_km"] = distance
+            game["score"] = _score_from_distance(distance)
     async with AGENT_LOCK:
         AGENT_STATE.game = game
     await _agent_refresh_frame()
 
 
 async def _agent_worker() -> None:
-    log_debug("agent_worker started")
     min_delay = float(os.getenv("AGENT_STEP_DELAY_MIN_SECONDS", "0.8"))
     max_delay = float(os.getenv("AGENT_STEP_DELAY_MAX_SECONDS", "1.8"))
     steps_template = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in AGENT_STEP_SEQUENCE]
@@ -544,7 +552,6 @@ async def _agent_worker() -> None:
             cmd = None
 
         if cmd == "start":
-            log_debug("agent_worker received START command")
             await _agent_set_error(None)
             async with AGENT_LOCK:
                 AGENT_STATE.game = _build_game_state()
@@ -554,7 +561,6 @@ async def _agent_worker() -> None:
             await set_steps_for_start()
             await _agent_refresh_frame()
         elif cmd == "stop":
-            log_debug("agent_worker received STOP command")
             async with AGENT_LOCK:
                 AGENT_STATE.running = False
                 AGENT_STATE.stop = True
@@ -572,13 +578,11 @@ async def _agent_worker() -> None:
             elapsed = time.monotonic() - step_started_at
             if elapsed >= current_step_delay and current_step_index < len(AGENT_STEP_SEQUENCE):
                 sid, _ = AGENT_STEP_SEQUENCE[current_step_index]
-                log_debug(f"performing step {current_step_index} id={sid}")
                 try:
                     await _agent_set_action(sid)
                     await _apply_agent_action(sid)
                 except Exception as exc:
                     await _agent_set_error(f"Action failed: {exc}")
-                    log_debug(f"action {sid} failed: {exc}")
                 await _mark_step_progress(current_step_index)
                 current_step_index += 1
                 step_started_at = time.monotonic()
@@ -913,6 +917,123 @@ def health():
     return {"ok": True}
 
 
+class AnalyzeRequest(BaseModel):
+    screenshot: str          # base64-encoded image (data URL or raw base64)
+    max_iterations: int = 5
+
+
+@app.post("/api/agent/analyze")
+async def agent_analyze(req: AnalyzeRequest):
+    """
+    Single-iteration: run the LangGraph pipeline on one screenshot.
+    Returns belief_state, action, action_history, final_guess.
+    Useful for debugging individual iterations.
+    """
+    initial_state: GeoState = {
+        "screenshot": req.screenshot,
+        "iteration": 0,
+        "max_iterations": req.max_iterations,
+        "specialist_outputs": {},
+        "belief_state": [],
+        "action": {},
+        "action_history": [],
+        "final_guess": None,
+        "error": None,
+    }
+    try:
+        result = geo_graph.invoke(initial_state)
+        return {
+            "belief_state": result.get("belief_state", []),
+            "action": result.get("action", {}),
+            "action_history": result.get("action_history", []),
+            "final_guess": result.get("final_guess"),
+            "specialist_outputs": result.get("specialist_outputs", {}),
+            "iteration": result.get("iteration", 0),
+            "error": result.get("error"),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class RunRequest(BaseModel):
+    screenshot: str          # initial base64 screenshot
+    start_lat: float         # starting Street View position
+    start_lon: float
+    start_heading: int = 0
+    max_iterations: int = 5
+
+
+@app.post("/api/agent/run")
+async def agent_run(req: RunRequest):
+    """
+    Full autopilot loop: runs the multi-iteration exploration pipeline.
+
+    Each iteration:
+      1. Calls the LangGraph pipeline (specialists + fusion) on the current screenshot.
+      2. If fusion returns GUESS → stop and return result.
+      3. If fusion returns ROTATE/MOVE → execute action (fetch new Street View frame) → repeat.
+
+    Stops early on GUESS or when max_iterations is exhausted.
+    """
+    maps_key = os.getenv("GOOGLE_MAPS_API_KEY", "")
+    view = GameView(req.start_lat, req.start_lon, req.start_heading)
+    screenshot = req.screenshot
+
+    belief_state: list = []
+    action_history: list = []
+    result: dict = {}
+    errors: list = []
+
+    for iteration in range(req.max_iterations):
+        state: GeoState = {
+            "screenshot": screenshot,
+            "iteration": iteration,
+            "max_iterations": req.max_iterations,
+            "specialist_outputs": {},       # fresh each iteration
+            "belief_state": belief_state,   # carry forward
+            "action": {},
+            "action_history": action_history,
+            "final_guess": None,
+            "error": None,
+        }
+
+        try:
+            result = geo_graph.invoke(state)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Graph error at iteration {iteration}: {e}")
+
+        belief_state = result.get("belief_state", belief_state)
+        action_history = result.get("action_history", action_history)
+        action = result.get("action", {})
+
+        if result.get("error"):
+            errors.append(result["error"])
+
+        # Committed a guess — done
+        if action.get("type") == "GUESS":
+            break
+
+        # Explore — execute action and fetch new screenshot
+        if not maps_key:
+            errors.append("GOOGLE_MAPS_API_KEY not set; cannot fetch new Street View frame")
+            break
+
+        try:
+            screenshot, view = execute_action(action, view, maps_key)
+        except Exception as e:
+            errors.append(f"Action execution failed at iteration {iteration}: {e}")
+            break
+
+    return {
+        "final_guess": result.get("final_guess"),
+        "belief_state": result.get("belief_state", []),
+        "action_history": action_history,
+        "iterations_used": result.get("iteration", 0),
+        "final_view": view.to_dict(),
+        "errors": errors if errors else None,
+    }
+
+
 @app.get("/api/agent/captures")
 def list_captures():
     files = []
@@ -941,24 +1062,39 @@ def list_captures():
 @app.on_event("startup")
 async def on_startup() -> None:
     _start_agent_thread()
+    async with AGENT_LOCK:
+        if not AGENT_STATE.get("game"):
+            AGENT_STATE["game"] = _build_game_state()
 
 
 @app.post("/api/agent/start")
 async def start_agent():
+    from graphs.agent_runner import run_langgraph_agent, _PIPELINE_STEPS
     async with AGENT_LOCK:
         if AGENT_STATE.running:
             return await _agent_snapshot()
+        game = _build_game_state()
         AGENT_STATE.running = True
         AGENT_STATE.stop = False
         AGENT_STATE.error = None
-        AGENT_STATE.game = _build_game_state()
-        AGENT_STATE.steps = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in AGENT_STEP_SEQUENCE]
+        AGENT_STATE.game = game
+        AGENT_STATE.steps = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in _PIPELINE_STEPS]
         AGENT_STATE.last_observation = None
         AGENT_STATE.captured_images = []
-    await _mark_step_running("capture")
-    await _set_pending_command("capture")
-    await _agent_set_action("capture")
+
+    # Fetch initial frame for immediate display, then kick off the pipeline
     await _agent_refresh_frame()
+
+    # Launch background LangGraph runner
+    asyncio.create_task(run_langgraph_agent(
+        agent_state=AGENT_STATE,
+        agent_lock=AGENT_LOCK,
+        start_lat=float(game["view_lat"]),
+        start_lon=float(game["view_lon"]),
+        start_heading=float(game["heading"]),
+        max_iterations=int(os.getenv("AGENT_MAX_ITERATIONS", "5")),
+    ))
+
     return await _agent_snapshot()
 
 
