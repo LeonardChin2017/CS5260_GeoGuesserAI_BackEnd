@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from graphs.agent_runner import run_langgraph_agent, _PIPELINE_STEPS
 from util import _0_if_nan
 
 load_dotenv()
@@ -136,11 +137,10 @@ GEO_LOCATIONS = [
 
 async def _agent_snapshot() -> dict[str, Any]:
     log_debug("agent_snapshot called")
-
     async with AGENT_LOCK:
-        steps = [dict(step) for step in AGENT_STATE.steps]
-        game: dict = asdict(AGENT_STATE.game) if isinstance(AGENT_STATE.game, Game) else None
-        captured_images = [dict(img) for img in (AGENT_STATE.captured_images or [])]
+        steps: list[dict[str, Any]] = [dict(step) for step in AGENT_STATE.steps]
+        game: Optional[dict[str, Any]] = asdict(AGENT_STATE.game) if isinstance(AGENT_STATE.game, Game) else None
+        captured_images: list[dict[str, Any]] = [dict(img) for img in (AGENT_STATE.captured_images or [])]
         return {
             "running": bool(AGENT_STATE.running),
             "steps": steps,
@@ -341,136 +341,6 @@ def _build_game_state() -> Game:
     )
 
 
-def _render_game_svg(game: Game) -> str:
-    heading: float = _0_if_nan(game.heading)
-    guess_lat: float = _0_if_nan(game.guess_lat)
-    guess_lon: float = _0_if_nan(game.guess_lon)
-    view_lat: float = _0_if_nan(game.view_lat)
-    view_lon: float = _0_if_nan(game.view_lon)
-    confidence = int((_0_if_nan(game.confidence)) * 100)
-    clues: list[str] = game.detected_clues if len(game.detected_clues) > 0 else \
-        game.clues if len(game.clues) > 0 else []
-    visible_clues: list[str] = clues[:4]
-    distance: float = game.final_distance_km
-    score: int = game.score
-    best_country: str = game.best_country_guess if len(game.best_country_guess) > 0 else "Analyzing..."
-    result = f"Distance: {distance:.0f} km | Score: {score}" if not isnan(distance) and score >= 0 else \
-        "Round in progress"
-    clue_rows = "".join(
-        f'<text x="40" y="{220 + i * 34}" font-size="20" fill="#d8e8ff">- {_escape_svg_text(str(clue))}</text>'
-        for i, clue in enumerate(visible_clues)
-    )
-    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#0f172a"/>
-      <stop offset="100%" stop-color="#1e3a8a"/>
-    </linearGradient>
-  </defs>
-  <rect width="1280" height="720" fill="url(#bg)"/>
-  <rect x="28" y="28" width="124" height="664" rx="22" fill="#0b1220" stroke="#334155" stroke-width="2"/>
-  <text x="40" y="76" font-size="32" fill="#f8fafc" font-family="Arial">GeoGuess AI Sandbox</text>
-  <text x="40" y="118" font-size="20" fill="#93c5fd" font-family="Arial">Heading: {heading}° | View: ({view_lat:.4f}, {view_lon:.4f}) | Guess: ({guess_lat:.3f}, {guess_lon:.3f}) | Confidence: {confidence}%</text>
-  <text x="40" y="170" font-size="24" fill="#facc15" font-family="Arial">Detected Clues</text>
-  {clue_rows}
-  <text x="40" y="620" font-size="22" fill="#a7f3d0" font-family="Arial">Best Country Match: {_escape_svg_text(str(best_country))}</text>
-  <text x="40" y="660" font-size="24" fill="#fde68a" font-family="Arial">{_escape_svg_text(result)}</text>
-</svg>"""
-    return base64.b64encode(svg.encode("utf-8")).decode("ascii")
-
-
-def _render_streetview_frame(game: Game) -> Optional[dict[str, str]]:
-    if not GOOGLE_MAPS_API_KEY:
-        return None
-    lat: float = game.view_lat if not isnan(game.view_lat) else _0_if_nan(game.target_lat)
-    lon: float = game.view_lon if not isnan(game.view_lon) else _0_if_nan(game.target_lon)
-    heading: float = _0_if_nan(game.heading)
-    params = {
-        "size": "640x640",
-        "scale": "2",
-        "location": f"{lat:.6f},{lon:.6f}",
-        "heading": str(heading),
-        "pitch": "0",
-        "fov": "90",
-        "key": GOOGLE_MAPS_API_KEY,
-    }
-    try:
-        res = requests.get("https://maps.googleapis.com/maps/api/streetview", params=params, timeout=20)
-        if not res.ok:
-            return None
-        content_type = (res.headers.get("content-type") or "").split(";")[0].strip().lower()
-        if not content_type.startswith("image/"):
-            return None
-        return {
-            "frame": base64.b64encode(res.content).decode("ascii"),
-            "mime": content_type,
-        }
-    except Exception:
-        return None
-
-
-def _render_streetview_from_view(lat: float, lon: float, heading: float, api_key_override: Optional[str] = None) \
-        -> Optional[dict[str, str]]:
-    api_key = (api_key_override or GOOGLE_MAPS_API_KEY or "").strip()
-    if not api_key:
-        return None
-    params = {
-        "size": "640x640",
-        "scale": "2",
-        "location": f"{lat:.6f},{lon:.6f}",
-        "heading": str(int(_wrap_heading(heading))),
-        "pitch": "0",
-        "fov": "90",
-        "key": api_key,
-    }
-    try:
-        res = requests.get("https://maps.googleapis.com/maps/api/streetview", params=params, timeout=20)
-        if not res.ok:
-            return None
-        content_type = (res.headers.get("content-type") or "").split(";")[0].strip().lower()
-        if not content_type.startswith("image/"):
-            return None
-        return {
-            "mime": content_type,
-            "data": base64.b64encode(res.content).decode("ascii"),
-        }
-    except Exception:
-        return None
-
-
-def _render_streetview_from_url(url: Optional[str]) -> Optional[dict[str, str]]:
-    raw_url = (url or "").strip()
-    if not raw_url:
-        return None
-    if not raw_url.startswith("https://maps.googleapis.com/maps/api/streetview"):
-        return None
-    try:
-        res = requests.get(raw_url, timeout=20)
-        if not res.ok:
-            return None
-        content_type = (res.headers.get("content-type") or "").split(";")[0].strip().lower()
-        if not content_type.startswith("image/"):
-            return None
-        return {
-            "mime": content_type,
-            "data": base64.b64encode(res.content).decode("ascii"),
-        }
-    except Exception:
-        return None
-
-
-async def _agent_refresh_frame() -> None:
-    async with AGENT_LOCK:
-        game: Optional[Game] = AGENT_STATE.game
-    if game is None:
-        return
-    streetview = _render_streetview_frame(game)
-    if streetview:
-        await _agent_set_frame(streetview["frame"], streetview["mime"])
-    else:
-        await _agent_set_frame(_render_game_svg(game), "image/svg+xml")
-
-
 async def _mark_step_progress(step_index: int) -> None:
     async with AGENT_LOCK:
         if not AGENT_STATE.steps:
@@ -531,7 +401,6 @@ async def _apply_agent_action(step_id: str) -> None:
             game.score = _score_from_distance(distance)
     async with AGENT_LOCK:
         AGENT_STATE.game = game
-    await _agent_refresh_frame()
 
 
 async def _agent_worker() -> None:
@@ -566,7 +435,6 @@ async def _agent_worker() -> None:
                 AGENT_STATE.running = True
                 AGENT_STATE.stop = False
             await set_steps_for_start()
-            await _agent_refresh_frame()
         elif cmd == "stop":
             async with AGENT_LOCK:
                 AGENT_STATE.running = False
@@ -867,11 +735,10 @@ async def on_startup() -> None:
 
 @app.post("/api/agent/start")
 async def start_agent():
-    from graphs.agent_runner import run_langgraph_agent, _PIPELINE_STEPS
     async with AGENT_LOCK:
         if AGENT_STATE.running:
             return await _agent_snapshot()
-        game = _build_game_state()
+        game: Game = _build_game_state()
         AGENT_STATE.running = True
         AGENT_STATE.stop = False
         AGENT_STATE.error = None
@@ -879,9 +746,6 @@ async def start_agent():
         AGENT_STATE.steps = [{"id": sid, "message": msg, "status": "pending"} for sid, msg in _PIPELINE_STEPS]
         AGENT_STATE.last_observation = None
         AGENT_STATE.captured_images = []
-
-    # Fetch initial frame for immediate display, then kick off the pipeline
-    await _agent_refresh_frame()
 
     # Launch background LangGraph runner
     asyncio.create_task(run_langgraph_agent(
@@ -979,39 +843,9 @@ async def agent_observation(body: AgentObservationRequest):
             else:
                 capture_debug = "data_url_invalid"
         elif command == "capture":
-            captured = None
-            if body.screenshot_url:
-                captured = _render_streetview_from_url(body.screenshot_url)
-            if body.view_lat is not None and body.view_lon is not None:
-                captured = captured or _render_streetview_from_view(
-                    float(body.view_lat),
-                    float(body.view_lon),
-                    float(body.heading or 0.0),
-                    body.maps_api_key,
-                )
-            if captured:
-                images = list(AGENT_STATE.captured_images or [])
-                image_id = f"cap-{int(time.time() * 1000)}"
-                saved_url = _persist_capture_image(image_id, captured["mime"], captured["data"])
-                images.append(
-                    {
-                        "id": image_id,
-                        "captured_at": datetime.now(UTC).isoformat(),
-                        "mime": captured["mime"],
-                        "data": captured["data"],
-                        "screenshot_url": None,
-                        "saved_url": saved_url,
-                    }
-                )
-                AGENT_STATE.captured_images = images[-8:]
-                capture_debug = (
-                        f"stored_backend_view mime={captured['mime']} bytes={len(captured['data'])}"
-                        + (f" saved={saved_url}" if saved_url else " saved=write_failed")
-                )
-            else:
-                capture_debug = "missing_frontend_screenshot_and_backend_view_failed"
+            raise NotImplementedError("This functionality is retired")
         if command == "capture":
-            AGENT_STATE.last_observation["capture_debug"] = capture_debug
+            raise NotImplementedError("This functionality is retired")
 
     # Frontend already performs visual rotation and reports resulting POV.
     # Avoid applying additional backend-side rotate deltas which cause jumpy motion.
@@ -1040,7 +874,6 @@ async def agent_observation(body: AgentObservationRequest):
         async with AGENT_LOCK:
             AGENT_STATE.running = False
 
-    await _agent_refresh_frame()
     return await _agent_snapshot()
 
 
@@ -1055,7 +888,6 @@ async def game_start():
         AGENT_STATE.last_observation = None
         AGENT_STATE.last_action = None
         AGENT_STATE.captured_images = []
-    await _agent_refresh_frame()
     return await _agent_snapshot()
 
 
@@ -1093,10 +925,6 @@ async def agent_status():
 @app.get("/api/agent/frame")
 async def agent_frame():
     _start_agent_thread()
-    async with AGENT_LOCK:
-        has_frame = bool(AGENT_STATE.frame)
-    if not has_frame:
-        await _agent_refresh_frame()
     async with AGENT_LOCK:
         frame = AGENT_STATE.frame
         frame_mime = AGENT_STATE.frame_mime or "image/svg+xml"

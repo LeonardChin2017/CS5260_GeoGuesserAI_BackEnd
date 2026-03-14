@@ -21,9 +21,9 @@ Analyze this image and identify any visible text, scripts, or language clues.
 Return ONLY a valid JSON object — no markdown, no explanation — with this exact schema:
 {
   "agent": "text_language",
-  "detected_scripts": ["list of writing systems visible, e.g. Latin, Cyrillic, Arabic, CJK, Devanagari, Hangul, Thai, Hebrew, Georgian"],
+  "detected_scripts": ["list of writing systems visible, e.g. Latin, Cyrillic, Arabic, Chinese, Devanagari, Thai, Hebrew, Georgian"],
   "language_hints": ["list of possible languages based on scripts and text patterns"],
-  "place_names": ["any readable place names, street names, URLs, phone prefixes, or domain suffixes"],
+  "place_names": ["any readable place names, street names, phone prefixes, or domain suffixes"],
   "confidence": <float 0.0-1.0, how certain you are about the language/region>,
   "evidence": "<one sentence summarising the strongest clue you found>"
 }
@@ -39,7 +39,7 @@ Return ONLY a valid JSON object — no markdown, no explanation — with this ex
   "agent": "architecture",
   "building_styles": ["list of styles/periods, e.g. Soviet-era, Colonial, Ottoman, Scandinavian modern, South Asian vernacular"],
   "materials": ["dominant construction materials, e.g. brick, concrete, wood, adobe"],
-  "urban_density": "<low | medium | high | rural>",
+  "urban_density": "<low | medium | high | rural | uninhabited>",
   "street_furniture": ["notable items, e.g. utility poles, letterboxes, bus shelters, bollards"],
   "national_flags_or_symbols": ["any visible national or regional symbols"],
   "confidence": <float 0.0-1.0>,
