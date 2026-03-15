@@ -7,8 +7,6 @@
     <list default="true" id="fe7c0038-b270-439e-8bcc-f2c8959dc5a4" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/ARCHITECTURE.md" beforeDir="false" afterPath="$PROJECT_DIR$/ARCHITECTURE.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/DEPLOY-DIGITALOCEAN.md" beforeDir="false" afterPath="$PROJECT_DIR$/DEPLOY-DIGITALOCEAN.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/Install.md" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -136,6 +134,7 @@
       <updated>1773500878041</updated>
       <workItem from="1773500879755" duration="7305000" />
       <workItem from="1773543560728" duration="14129000" />
+      <workItem from="1773559642311" duration="48000" />
     </task>
     <servers />
   </component>

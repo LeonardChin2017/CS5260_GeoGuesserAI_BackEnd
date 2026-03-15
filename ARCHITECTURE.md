@@ -158,7 +158,6 @@ Each step gets a `status` (`pending | running | done`) and optionally a `detail`
 | `GET` | `/api/agent/frame` | Poll current Street View frame (base64 JPEG) |
 | `POST` | `/api/agent/analyze` | Single-iteration LangGraph run on a provided screenshot |
 | `POST` | `/api/agent/run` | Full multi-iteration autopilot loop (blocking, returns final result) |
-| `GET` | `/api/agent/captures` | List saved capture files |
 
 ## LangGraph Agent Mode
 - **Start**: `POST /api/agent/start`
