@@ -59,7 +59,7 @@ class Agent:
             action: str = result.action["type"]
             if action == "GUESS":
                 guess_dist: float = game.guess(result.final_guess["lat"], result.final_guess["lon"])
-                log_event(f"Guess distance: {guess_dist}km")
+                log_event(f"GUESS RESULT: {guess_dist}km")
                 return {
                     "final_guess": result.final_guess,
                     "belief_state": result.belief_state,
@@ -67,7 +67,7 @@ class Agent:
                     "errors": result.error
                 }
             if action == "ROTATE":
-                game.turn(result.action["degree"], 0)
+                game.turn(result.action["degrees"], 0)
             elif action == "MOVE":
                 game.move_forward()
         return {"error": f"Agent did not give a guess after {max_iter} iterations"}
