@@ -6,14 +6,6 @@
   <component name="ChangeListManager">
     <list default="true" id="fe7c0038-b270-439e-8bcc-f2c8959dc5a4" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.env.example" beforeDir="false" afterPath="$PROJECT_DIR$/.env.example" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/agent.py" beforeDir="false" afterPath="$PROJECT_DIR$/agent.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/game.py" beforeDir="false" afterPath="$PROJECT_DIR$/game.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/graphs/nodes/fusion.py" beforeDir="false" afterPath="$PROJECT_DIR$/graphs/nodes/fusion.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/graphs/nodes/specialists.py" beforeDir="false" afterPath="$PROJECT_DIR$/graphs/nodes/specialists.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_fusion_planner.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_fusion_planner.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_gemini_specialists.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_gemini_specialists.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/util.py" beforeDir="false" afterPath="$PROJECT_DIR$/util.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -140,7 +132,7 @@
       <option name="presentableId" value="Default" />
       <updated>1773500878041</updated>
       <workItem from="1773500879755" duration="7305000" />
-      <workItem from="1773543560728" duration="8759000" />
+      <workItem from="1773543560728" duration="8980000" />
     </task>
     <servers />
   </component>
