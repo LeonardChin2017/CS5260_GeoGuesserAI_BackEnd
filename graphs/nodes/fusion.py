@@ -15,11 +15,10 @@ Evidence weighting hierarchy (encoded in the prompt):
   5. Vegetation       — broad biome narrowing, weakest alone but useful corroboration
 """
 import json
-import os
 
 from graphs.nodes.gemini_vision import call_gemini_vision, parse_json_response
 from graphs.state import GeoState
-from util import log_event
+from util import log_event, GEMINI_API_KEY
 
 # Confidence threshold to commit a guess without exhausting the iteration budget
 CONFIDENCE_THRESHOLD = 0.75
@@ -100,7 +99,7 @@ def fusion_planner_node(state: GeoState) -> dict:
         raw = call_gemini_vision(
             prompt=prompt,
             screenshot=state["screenshot"],
-            api_key=os.getenv("GEMINI_API_KEY", ""),
+            api_key=GEMINI_API_KEY
         )
         log_event(f"fusion result:\n{raw}")
         result = parse_json_response(raw)

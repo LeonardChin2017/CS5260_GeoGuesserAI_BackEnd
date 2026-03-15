@@ -7,10 +7,11 @@ Integration tests — hit real Gemini API, require GEMINI_API_KEY env var,
 """
 import base64
 import json
-import os
 from unittest.mock import patch
 
 import pytest
+
+from util import GEMINI_API_KEY
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -248,11 +249,7 @@ class TestSpecialistsRealGemini:
 
     @pytest.fixture(autouse=True)
     def require_api_key(self):
-        from dotenv import load_dotenv
-        load_dotenv()
-        key = os.getenv("GEMINI_API_KEY", "")
-        if not key:
-            pytest.skip("GEMINI_API_KEY not set — skipping integration test")
+        key = GEMINI_API_KEY
 
     def test_text_language_real(self):
         from graphs.nodes.specialists import text_language_node

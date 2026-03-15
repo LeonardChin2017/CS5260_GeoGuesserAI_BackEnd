@@ -2,8 +2,6 @@ from dataclasses import dataclass
 from http.client import HTTPException
 from typing import Any
 
-from dotenv import load_dotenv
-
 from game import Game
 from graphs.geoguessr_graph import geo_graph
 from graphs.state import GeoState
@@ -76,7 +74,6 @@ class Agent:
 
 
 if __name__ == "__main__":
-    load_dotenv()
     game: Game = Game()
     game.set_to_random_street_view()
     print(Agent().run(game, max_iter=3))

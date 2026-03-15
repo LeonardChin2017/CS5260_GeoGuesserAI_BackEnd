@@ -6,7 +6,6 @@ Integration — hit real Gemini API, require GEMINI_API_KEY, run with: pytest -m
 """
 import base64
 import json
-import os
 from unittest.mock import patch
 
 import pytest
@@ -274,14 +273,6 @@ def test_full_graph_with_real_fusion_mocked():
 
 @pytest.mark.integration
 class TestFusionRealGemini:
-
-    @pytest.fixture(autouse=True)
-    def require_api_key(self):
-        from dotenv import load_dotenv
-        load_dotenv()
-        if not os.getenv("GEMINI_API_KEY", ""):
-            pytest.skip("GEMINI_API_KEY not set")
-
     def test_fusion_returns_valid_structure(self):
         from graphs.nodes.fusion import fusion_planner_node
         result = fusion_planner_node(_make_state(specialists=HIGH_CONFIDENCE_SPECIALISTS))

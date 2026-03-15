@@ -5,11 +5,9 @@ and returns structured JSON evidence for the fusion/planner node.
 Each node only writes its own key into specialist_outputs.
 The Annotated reducer in GeoState merges all parallel outputs automatically.
 """
-import os
-
 from graphs.nodes.gemini_vision import call_gemini_vision, parse_json_response
 from graphs.state import GeoState
-from util import log_event
+from util import log_event, GEMINI_API_KEY
 
 # ---------------------------------------------------------------------------
 # Prompts — kept focused so the model returns clean, parseable JSON
@@ -100,9 +98,6 @@ Return ONLY a valid JSON object — no markdown, no explanation — with this ex
 # Shared helper
 # ---------------------------------------------------------------------------
 
-def _get_api_key() -> str:
-    return os.getenv("GEMINI_API_KEY", "")
-
 
 def _run_specialist(agent_key: str, prompt: str, state: GeoState, fallback: dict) -> dict:
     """
@@ -110,7 +105,7 @@ def _run_specialist(agent_key: str, prompt: str, state: GeoState, fallback: dict
     On any error, returns the fallback dict with error info.
     """
     try:
-        raw = call_gemini_vision(prompt, state["screenshot"], _get_api_key())
+        raw = call_gemini_vision(prompt, state["screenshot"], GEMINI_API_KEY)
         log_event(f"{agent_key} result:\n{raw}")
         output = parse_json_response(raw)
         # Ensure required fields are present

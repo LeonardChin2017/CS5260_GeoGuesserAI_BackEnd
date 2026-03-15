@@ -1,15 +1,13 @@
 import base64
-import os
 from dataclasses import dataclass
 from math import nan
 
 import requests
-from dotenv import load_dotenv
 from pyproj import Geod
 
-from util import log_event
+from util import log_event, GOOGLE_MAPS_API_KEY
 
-GEO_LOCATIONS = [
+TEST_LOCATIONS = [
     {"lat": 35.6595, "lon": 139.7005},
     {"lat": -22.9711, "lon": -43.1822},
     {"lat": -33.9628, "lon": 18.4098},
@@ -46,7 +44,7 @@ class Game:
         self._cur_lat: float = nan  # degree
         self._pitch: float = nan  # degree
         self.heading: float = nan  # degree, clockwise from true north
-        self.api_key: str = os.getenv("GOOGLE_MAPS_API_KEY")
+        self.api_key: str = GOOGLE_MAPS_API_KEY
 
     def reset(self, lat: float, lon: float, heading: float) -> None:
         self._cur_lat = self._tar_lat = lat
@@ -56,7 +54,7 @@ class Game:
 
     def set_to_random_street_view(self) -> None:
         """TODO pick randomly in the world"""
-        target = GEO_LOCATIONS[4]
+        target = TEST_LOCATIONS[4]
         self.reset(target["lat"], target["lon"], 0.0)
 
     def _street_view_url(self, size: str = "1920x1280", fov: float = 100) -> str:
@@ -116,12 +114,4 @@ class Game:
 
 
 if __name__ == "__main__":
-    load_dotenv()
-    game = Game()
-    game.set_to_random_street_view()
-    print(game._street_view_url())
-    game.move_forward()
-    print(game._street_view_url())
-    game.turn(delta_yaw=45.0, delta_pitch=10.0)
-    print(game._street_view_url())
-    print(f"{game.guess(1.3521, 103.8198)}km")
+    pass
