@@ -92,7 +92,7 @@ def fusion_planner_stub(state: GeoState) -> dict:
         final_guess = {"lat": 0.0, "lon": 0.0, "confidence": 0.1}
     else:
         action = {"type": "ROTATE", "degrees": 90}
-        final_guess = None
+        final_guess = {}
 
     belief_state = [
         {

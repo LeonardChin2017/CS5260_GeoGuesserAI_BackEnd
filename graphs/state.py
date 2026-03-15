@@ -14,7 +14,7 @@ class GeoState(TypedDict):
     # Input: base64-encoded screenshot (data URL or raw base64 JPEG)
     screenshot: str
 
-    # How many exploration iterations have been used so far
+    # The current iterations number (0-indexed)
     iteration: int
 
     # Budget: stop exploring and commit guess after this many iterations
@@ -32,7 +32,7 @@ class GeoState(TypedDict):
     action: dict
 
     # Set when the agent commits a final guess
-    final_guess: Optional[dict]
+    final_guess: dict
 
     # Optional error message from any node
-    error: Optional[str]
+    error: str

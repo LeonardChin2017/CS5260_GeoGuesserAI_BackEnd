@@ -125,7 +125,7 @@ def _build_state_update(result: dict, state: GeoState, iteration: int, forced: b
     # Normalise action
     action = _normalise_action(action_raw, belief_state)
 
-    final_guess = None
+    final_guess = {}
     if action["type"] == "GUESS":
         final_guess = {
             "lat": action.get("lat", 0.0),
@@ -138,7 +138,7 @@ def _build_state_update(result: dict, state: GeoState, iteration: int, forced: b
         "action": action,
         "final_guess": final_guess,
         "iteration": iteration + 1,
-        "error": None,
+        "error": '',
     }
 
 
@@ -186,7 +186,7 @@ def _forced_guess(state: GeoState, specialist_outputs: dict, iteration: int) -> 
         "action": action,
         "final_guess": final_guess,
         "iteration": iteration + 1,
-        "error": None,
+        "error": '',
     }
 
 

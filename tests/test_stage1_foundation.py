@@ -76,13 +76,13 @@ def test_state_schema_all_keys():
         "specialist_outputs": {},
         "belief_state": [],
         "action": {},
-        "final_guess": None,
-        "error": None,
+        "final_guess": {},
+        "error": '',
     }
     assert state["iteration"] == 0
     assert state["max_iterations"] == 5
     assert state["specialist_outputs"] == {}
-    assert state["final_guess"] is None
+    assert len(state["final_guess"]) <= 0
 
 
 # ---------------------------------------------------------------------------
@@ -98,8 +98,8 @@ def _base_state():
         specialist_outputs={},
         belief_state=[],
         action={},
-        final_guess=None,
-        error=None,
+        final_guess={},
+        error='',
     )
 
 
@@ -127,7 +127,7 @@ def test_stub_node_output(func_name, key, required_fields):
 def test_ingest_node_passes_with_screenshot():
     from graphs.nodes.stubs import ingest_node
     result = ingest_node(_base_state())
-    assert result.get("error") is None
+    assert len(result.get("error", '')) <= 0
 
 
 def test_ingest_node_fails_without_screenshot():
@@ -135,7 +135,7 @@ def test_ingest_node_fails_without_screenshot():
     state = _base_state()
     state["screenshot"] = ""
     result = ingest_node(state)
-    assert result["error"] is not None
+    assert len(result["error"]) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +170,7 @@ def test_graph_commits_at_budget():
     state["max_iterations"] = 1
     result = geo_graph.invoke(state)
     assert result["action"]["type"] == "GUESS"
-    assert result["final_guess"] is not None
+    assert len(result["final_guess"]) > 0
 
 
 def test_graph_explore_decision_when_mocked():
@@ -186,7 +186,7 @@ def test_graph_explore_decision_when_mocked():
     with patch("graphs.nodes.fusion.call_gemini_vision", return_value=rotate_response):
         result = geo_graph.invoke(state)
     assert result["action"]["type"] == "ROTATE"
-    assert result["final_guess"] is None
+    assert len(result["final_guess"]) <= 0
 
 
 # ---------------------------------------------------------------------------
@@ -226,4 +226,4 @@ def test_analyze_endpoint_commits_at_max_1(client):
     r = client.post("/api/agent/analyze", json={"screenshot": MOCK_B64, "max_iterations": 1})
     data = r.json()
     assert data["action"]["type"] == "GUESS"
-    assert data["final_guess"] is not None
+    assert len(data["final_guess"]) > 0

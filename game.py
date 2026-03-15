@@ -1,3 +1,4 @@
+import base64
 import os
 from dataclasses import dataclass
 from math import nan
@@ -42,16 +43,20 @@ class Game:
         self._tar_lat: float = nan
         self._cur_lon: float = nan  # degree
         self._cur_lat: float = nan  # degree
-        self._pitch: float = 0.0  # degree
-        self.heading: float = 0.0  # degree, clockwise from true north
+        self._pitch: float = nan  # degree
+        self.heading: float = nan  # degree, clockwise from true north
         self.api_key: str = os.getenv("GOOGLE_MAPS_API_KEY")
-        self.pick_random_street_view()
 
-    def pick_random_street_view(self) -> None:
+    def reset(self, lat: float, lon: float, heading: float) -> None:
+        self._cur_lat = self._tar_lat = lat
+        self._cur_lon = self._tar_lon = lon
+        self._pitch = 0.0
+        self.heading = heading
+
+    def set_to_random_street_view(self) -> None:
         """TODO pick randomly in the world"""
         target = GEO_LOCATIONS[3]
-        self._cur_lon = self._tar_lon = target["lon"]
-        self._cur_lat = self._tar_lat = target["lat"]
+        self.reset(target["lat"], target["lon"], 0.0)
 
     def _street_view_url(self, size: str = "1920x1280", fov: float = 100) -> str:
         if len(self.api_key) <= 0:
@@ -66,18 +71,16 @@ class Game:
             f"&key={self.api_key}"
         )
 
-    def render_image(self, size: str = "1920x1280", timeout: int = 20) -> StreetViewImage:
+    def render_image(self, size: str = "1920x1280", timeout: int = 20) -> str:
         """ Fetch the image of current Street View"""
         url: str = self._street_view_url(size=size)
         log_event(f"Fetching {url}")
         res = requests.get(url, timeout=timeout)
         res.raise_for_status()
-
         content_type = (res.headers.get("content-type") or "").split(";")[0].strip().lower()
         if not content_type.startswith("image/"):
             raise ValueError(f"Street View API returned non-image content: {content_type}")
-
-        return StreetViewImage(mime=content_type, data=res.content)
+        return base64.b64encode(res.content).decode("utf-8")
 
     def turn(self, delta_yaw: float = 0.0, delta_pitch: float = 0.0) -> None:
         """
@@ -114,6 +117,7 @@ class Game:
 if __name__ == "__main__":
     load_dotenv()
     game = Game()
+    game.set_to_random_street_view()
     print(game._street_view_url())
     game.move_forward()
     print(game._street_view_url())
