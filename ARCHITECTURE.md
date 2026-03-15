@@ -2,10 +2,7 @@
 
 ## Overview
 
-The backend is a FastAPI application (`app.py`) that serves two purposes:
-
-1. **GeoGuessr AI Agent** — a multi-agent LangGraph pipeline that takes a Street View screenshot, runs 5 parallel specialist agents via Gemini, fuses the evidence, and places a guess.
-2. **JobAI Chat** — a legacy exam question generator using Gemini or DeepSeek (not related to GeoGuessr).
+The backend is a FastAPI application (`app.py`) that serves as a **GeoGuessr AI Agent** — a multi-agent LangGraph pipeline that takes a Street View screenshot, runs 5 parallel specialist agents via Gemini, fuses the evidence, and places a guess.
 
 ---
 
@@ -15,7 +12,6 @@ The backend is a FastAPI application (`app.py`) that serves two purposes:
 |---|---|
 | Web framework | FastAPI + uvicorn (port 3001) |
 | AI (vision) | Google Gemini (gemini-2.5-flash by default) |
-| AI (chat) | Gemini or DeepSeek |
 | Graph pipeline | LangGraph (`StateGraph`) |
 | Street View frames | Google Maps Street View Static API |
 
@@ -25,28 +21,23 @@ The backend is a FastAPI application (`app.py`) that serves two purposes:
 
 ```
 JobAIBackEnd/
-├── app.py                         # Main FastAPI application (~1350 lines)
+├── app.py                         # Main FastAPI application
+├── agent.py                       # Agent control and information kept 
+├── game.py                        # Environment infomation; image capture; random streetview picking; game evaluation
+├── util.py                        # Logging & API keys
 ├── graphs/
 │   ├── state.py                   # GeoState TypedDict
 │   ├── geoguessr_graph.py         # LangGraph pipeline definition
-│   ├── agent_runner.py            # Async background runner (drives the pipeline)
-│   ├── action_executor.py         # ROTATE/MOVE → new Street View frame
 │   └── nodes/
 │       ├── ingest.py              # Input validation node
 │       ├── specialists.py         # 5 Gemini specialist nodes (parallel)
 │       ├── fusion.py              # Fusion/planner node (decision making)
 │       ├── gemini_vision.py       # Shared Gemini REST helper
 │       └── stubs.py               # Test stubs (mock nodes for unit tests)
-├── tests/
-│   ├── test_stage1_foundation.py  # Graph wiring + API endpoint tests
-│   └── test_gemini_specialists.py # Specialist node unit + integration tests
-├── prompts/
-│   ├── system.txt                 # Chat LLM system prompt
-│   └── format_guard.txt           # Chat output format constraints
-├── data/
-│   ├── keys.db                    # SQLite (Clerk per-user API keys, optional)
-│   └── captures/                  # Persisted Street View captures
-└── generated_papers/              # PDF output directory
+└── tests/
+    ├── test_stage1_foundation.py  # Graph wiring + API endpoint tests
+    └── test_gemini_specialists.py # Specialist node unit + integration tests
+
 ```
 
 ---
@@ -77,8 +68,8 @@ class GeoState(TypedDict):
     specialist_outputs: Annotated[dict, _merge_dicts]  # merged by parallel reducer
     belief_state: list            # ranked candidate locations [{country, lat, lon, confidence, evidence}]
     action: dict                  # {type: GUESS|ROTATE|MOVE, ...}
-    final_guess: Optional[dict]   # set when committing a GUESS
-    error: Optional[str]          # error from any node
+    final_guess: dict   # set when committing a GUESS
+    error: str          # error from any node
 ```
 
 ### Nodes
@@ -117,9 +108,9 @@ Forces GUESS at `iteration >= max_iterations - 1`. Falls back to `(0, 0)` on API
 #### `call_gemini_vision` (`nodes/gemini_vision.py`)
 Shared Gemini REST helper. Retries up to 3× on HTTP 429 (rate limit) with 15s/30s/45s backoff. Parses JSON from markdown fences. Raises `ValueError` if API key is missing.
 
-### Action Execution (`action_executor.py`)
+### Action Execution
 
-`GameView` tracks lat/lon/heading. `execute_action()` applies ROTATE or MOVE and fetches the next Street View frame via the Static API.
+`Game` tracks lat/lon/heading. `Agent.run()` applies ROTATE or MOVE and fetches the next Street View frame via the Static API.
 
 ```
 ROTATE(degrees) → same position, new heading
@@ -128,11 +119,11 @@ MOVE(forward)   → advance 50m along current heading
 
 ---
 
-## Agent Runner (`graphs/agent_runner.py`)
+## Agent Runner
 
-Async background coroutine (`run_langgraph_agent`) that:
+Async background coroutine (`agent.run()`) that:
 
-1. **Capture** — fetches Street View JPEG via `fetch_streetview_screenshot`
+1. **Capture** — fetches Street View image
 2. **Analyse** — invokes `geo_graph` (specialists + fusion) in a thread executor
 3. **Decide** — if GUESS: compute score and stop; if ROTATE/MOVE: execute and loop
 
@@ -153,31 +144,6 @@ guess          → Placing guess
 
 Each step gets a `status` (`pending | running | done`) and optionally a `detail` string (e.g., `"Cyrillic, Latin (85%)"` for text_language).
 
-### Scoring
-
-```python
-distance_km = equirectangular_approximation(guess, target)
-score        = max(0, 5000 - distance_km * 4)
-```
-
----
-
-## Shared State: `AGENT_STATE`
-
-Module-level dict in `app.py`. Protected by `AGENT_LOCK` (asyncio.Lock). Key fields:
-
-| Field | Type | Description |
-|---|---|---|
-| `running` | bool | True while pipeline is executing |
-| `stop` | bool | Signal to abort |
-| `steps` | list | Current pipeline step statuses |
-| `frame` | str | Base64 JPEG of current Street View frame |
-| `frame_mime` | str | MIME type of `frame` |
-| `game` | dict | Game state (target coords, guess coords, score, etc.) |
-| `captured_images` | list | Last 8 captured frames (base64 + metadata) |
-| `error` | str\|None | Most recent error message |
-| `pending_command` | str\|None | Legacy frontend-commanded protocol (unused in LangGraph mode) |
-
 ---
 
 ## API Endpoints
@@ -194,40 +160,13 @@ Module-level dict in `app.py`. Protected by `AGENT_LOCK` (asyncio.Lock). Key fie
 | `POST` | `/api/agent/run` | Full multi-iteration autopilot loop (blocking, returns final result) |
 | `GET` | `/api/agent/captures` | List saved capture files |
 
-### Manual Game (legacy)
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/api/game/start` | Reset to a new random location |
-| `GET` | `/api/game/state` | Get current game state |
-| `POST` | `/api/game/action` | Apply a manual action (`rotate_left`, `move_forward`, `guess`, etc.) |
-
-### Frontend-commanded protocol (legacy, not used by LangGraph mode)
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/agent/next-command` | Frontend polls for next command to execute |
-| `POST` | `/api/agent/observation` | Frontend reports result of executing a command |
-
-
----
-
-## Two Agent Modes
-
-The backend supports two distinct agent modes:
-
-### LangGraph Mode (current, recommended)
+## LangGraph Agent Mode
 - **Start**: `POST /api/agent/start`
 - Backend fetches Street View frames itself (no browser needed)
 - Backend runs all Gemini calls
 - Frontend only polls `/api/agent/status` and `/api/agent/frame`
 - Frontend shows backend JPEG (not Google Maps panorama) during run
 - Panorama position is silently updated so it's synced when agent finishes
-
-### Frontend-commanded Mode (legacy)
-- `pending_command` is set by backend, frontend executes it (captures, rotates) and reports back
-- Used for the old demo flow where browser screenshots were needed
-- Still wired but not triggered in LangGraph mode
 
 ---
 
@@ -237,9 +176,6 @@ The backend supports two distinct agent modes:
 GEMINI_API_KEY=         # Required for agent analysis
 GEMINI_MODEL=           # Default: gemini-2.5-flash (use gemini-2.0-flash-lite for higher free-tier quota)
 GOOGLE_MAPS_API_KEY=    # Required for Street View frame fetching
-DEEPSEEK_API_KEY=       # Optional, for chat
-CLERK_SECRET_KEY=       # Optional, for per-user key storage
-ENCRYPTION_SECRET=      # Optional, for encrypting stored API keys
 LOG_LEVEL=              # Default: WARNING
 AGENT_MAX_ITERATIONS=   # Default: 5
 AGENT_STEP_DELAY_MIN_SECONDS=  # Default: 0.8
@@ -249,7 +185,5 @@ AGENT_STEP_DELAY_MAX_SECONDS=  # Default: 1.8
 ---
 
 ## Known Limitations
-
-- **Loyalty**: Currently only support 1 concurrent client.
-- **Scoring formula**: Uses equirectangular approximation (not Haversine). Accurate enough for game scoring but not geodetically precise.
+- **Gemini free tier**: `gemini-2.5-flash` has a 20 req/day free limit. Each agent run uses 6 calls (5 specialists + 1 fusion). Use `gemini-2.0-flash-lite` (1500 req/day) or enable billing.
 - **No real GeoGuessr integration**: Targets are randomly selected from 4 built-in demo locations.

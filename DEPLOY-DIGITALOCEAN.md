@@ -6,12 +6,17 @@
 2. Source: connect repo, set Source Directory to `Backend`.
 3. Resources: Web Service.
 4. Build:
-   - Build Command: `pip install -r requirements.txt`
-   - Run Command: `uvicorn app:app --host 0.0.0.0 --port 3001`
+   ```bash
+   cd Backend
+   cp .env.example .env
+   conda create -n GGSolver python=3.14 -y && conda activate GGSolver
+   pip install -r requirements.txt
+   uvicorn app:app --host 0.0.0.0 --port 3001
+   ```
    - HTTP Port: `3001`
 5. Environment Variables:
-   - `ENCRYPTION_SECRET` (optional, min 16 chars)
-   - `GEMINI_API_KEY` / `DEEPSEEK_API_KEY` (optional fallback)
+   - `GOOGLE_MAPS_API_KEY`: Get one at https://console.cloud.google.com/apis/credentials
+   - `GEMINI_API_KEY`: Get one at https://aistudio.google.com/app/api-keys.
 6. Deploy, then set `VITE_API_URL` in frontend to your backend URL.
 
 ## Option 2: Droplet with Docker
