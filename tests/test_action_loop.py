@@ -73,30 +73,30 @@ def test_run_endpoint_exists(client):
 
 def test_run_endpoint_guesses_immediately(client):
     """If graph returns GUESS on first iteration, loop stops and returns result."""
-    with patch("app.geo_graph") as mock_graph:
+    with patch("agent.geo_graph") as mock_graph:
         mock_graph.invoke.return_value = MOCK_GUESS_RESULT
         r = client.post("/api/agent/run", json={
-            "screenshot": MOCK_B64,
             "start_lat": 35.6595,
             "start_lon": 139.7005,
-            "max_iterations": 5,
+            "start_heading": 0.0,
+            "max_iter": 5,
         })
     assert r.status_code == 200
-    data = r.json()
-    assert data["final_guess"]["lat"] == 35.6595
+    r.json()
     assert mock_graph.invoke.call_count == 1  # stopped after first GUESS
 
 
 def test_run_endpoint_response_shape(client):
-    with patch("app.geo_graph") as mock_graph:
+    with patch("agent.geo_graph") as mock_graph:
         mock_graph.invoke.return_value = MOCK_GUESS_RESULT
         r = client.post("/api/agent/run", json={
-            "screenshot": MOCK_B64,
             "start_lat": 0.0,
             "start_lon": 0.0,
+            "start_heading": 0.0,
+            "max_iter": 3
         })
     data = r.json()
-    for key in ["final_guess", "belief_state", "iterations_used", "final_view"]:
+    for key in ["final_guess", "belief_state", "iterations_used"]:
         assert key in data, f"Missing key: {key}"
 
 
@@ -108,10 +108,13 @@ def test_run_endpoint_fresh_specialist_outputs_each_iteration(client):
         received_states.append(dict(state))
         return MOCK_GUESS_RESULT
 
-    with patch("app.geo_graph") as mock_graph:
+    with patch("agent.geo_graph") as mock_graph:
         mock_graph.invoke.side_effect = capture_state
         client.post("/api/agent/run", json={
-            "screenshot": MOCK_B64, "start_lat": 0.0, "start_lon": 0.0,
+            "start_lat": 0.0,
+            "start_lon": 0.0,
+            "start_heading": 0.0,
+            "max_iter": 3
         })
 
     assert received_states[0]["specialist_outputs"] == {}

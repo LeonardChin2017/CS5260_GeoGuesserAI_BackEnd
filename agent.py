@@ -60,15 +60,14 @@ class Agent:
                 return {"error": result.error}
             action: str = result.action["type"]
             if action == "GUESS":
-                out: dict[str, Any] = {
+                guess_dist: float = game.guess(result.final_guess["lat"], result.final_guess["lon"])
+                log_event(f"Guess distance: {guess_dist}km")
+                return {
                     "final_guess": result.final_guess,
                     "belief_state": result.belief_state,
                     "iterations_used": i + 1,
                     "errors": result.error
                 }
-                guess_dist: float = game.guess(result.final_guess["lat"], result.final_guess["lon"])
-                log_event(f"Guess distance: {guess_dist}km")
-                return out
             if action == "ROTATE":
                 game.turn(result.action["degree"], 0)
             elif action == "MOVE":

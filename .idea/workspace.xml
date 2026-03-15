@@ -5,20 +5,14 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="fe7c0038-b270-439e-8bcc-f2c8959dc5a4" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/.idea/ai_toolkit.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/agent.py" beforeDir="false" afterPath="$PROJECT_DIR$/agent.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app.py" beforeDir="false" afterPath="$PROJECT_DIR$/app.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/game.py" beforeDir="false" afterPath="$PROJECT_DIR$/game.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/graphs/action_executor.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/graphs/agent_runner.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/graphs/nodes/fusion.py" beforeDir="false" afterPath="$PROJECT_DIR$/graphs/nodes/fusion.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/graphs/nodes/ingest.py" beforeDir="false" afterPath="$PROJECT_DIR$/graphs/nodes/ingest.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/graphs/nodes/stubs.py" beforeDir="false" afterPath="$PROJECT_DIR$/graphs/nodes/stubs.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/graphs/state.py" beforeDir="false" afterPath="$PROJECT_DIR$/graphs/state.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tests/test_action_loop.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_action_loop.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_fusion_planner.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_fusion_planner.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_gemini_specialists.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_gemini_specialists.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tests/test_stage1_foundation.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_stage1_foundation.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/util.py" beforeDir="false" afterPath="$PROJECT_DIR$/util.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -46,6 +40,7 @@
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager": "true",
     "RunOnceActivity.git.unshallow": "true",
+    "SHARE_PROJECT_CONFIGURATION_FILES": "true",
     "git-widget-placeholder": "master",
     "node.js.detected.package.eslint": "true",
     "node.js.detected.package.tslint": "true",
@@ -55,7 +50,7 @@
     "vue.rearranger.settings.migration": "true"
   }
 }]]></component>
-  <component name="RunManager" selected="Python tests.pytest in tests">
+  <component name="RunManager" selected="Python.agent">
     <configuration name="agent" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="Backend" />
       <option name="ENV_FILES" value="" />
@@ -122,8 +117,8 @@
     </configuration>
     <recent_temporary>
       <list>
-        <item itemvalue="Python tests.pytest in tests" />
         <item itemvalue="Python.agent" />
+        <item itemvalue="Python tests.pytest in tests" />
         <item itemvalue="Python.game" />
       </list>
     </recent_temporary>
@@ -144,7 +139,7 @@
       <option name="presentableId" value="Default" />
       <updated>1773500878041</updated>
       <workItem from="1773500879755" duration="7305000" />
-      <workItem from="1773543560728" duration="4622000" />
+      <workItem from="1773543560728" duration="7999000" />
     </task>
     <servers />
   </component>
@@ -152,8 +147,8 @@
     <option name="version" value="3" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
-    <SUITE FILE_PATH="coverage/Backend$pytest_in_tests.coverage" NAME="pytest in tests Coverage Results" MODIFIED="1773548137099" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/tests" />
+    <SUITE FILE_PATH="coverage/Backend$pytest_in_tests.coverage" NAME="pytest in tests Coverage Results" MODIFIED="1773552416655" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/tests" />
     <SUITE FILE_PATH="coverage/Backend$game.coverage" NAME="game Coverage Results" MODIFIED="1773547340120" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
-    <SUITE FILE_PATH="coverage/Backend$agent.coverage" NAME="agent Coverage Results" MODIFIED="1773547533506" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/Backend$agent.coverage" NAME="agent Coverage Results" MODIFIED="1773552493556" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
 </project>

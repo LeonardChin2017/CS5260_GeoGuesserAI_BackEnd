@@ -10,10 +10,11 @@ from pyproj import Geod
 from util import log_event
 
 GEO_LOCATIONS = [
-    {"name": "Shibuya Crossing", "lat": 35.6595, "lon": 139.7005},
-    {"name": "Copacabana", "lat": -22.9711, "lon": -43.1822},
-    {"name": "Table Mountain", "lat": -33.9628, "lon": 18.4098},
-    {"name": "Reykjavik Harbor", "lat": 64.1466, "lon": -21.9426},
+    {"lat": 35.6595, "lon": 139.7005},
+    {"lat": -22.9711, "lon": -43.1822},
+    {"lat": -33.9628, "lon": 18.4098},
+    {"lat": 64.1466, "lon": -21.9426},
+    {"lat": 1.2975414, "lon": 103.7779669}
 ]
 
 _WGS84_GEOD = Geod(ellps="WGS84")
@@ -55,7 +56,7 @@ class Game:
 
     def set_to_random_street_view(self) -> None:
         """TODO pick randomly in the world"""
-        target = GEO_LOCATIONS[3]
+        target = GEO_LOCATIONS[4]
         self.reset(target["lat"], target["lon"], 0.0)
 
     def _street_view_url(self, size: str = "1920x1280", fov: float = 100) -> str:

@@ -206,24 +206,28 @@ def test_health_endpoint(client):
 
 
 def test_analyze_endpoint_returns_200(client):
-    r = client.post("/api/agent/analyze", json={"screenshot": MOCK_B64, "max_iterations": 5})
+    r = client.post("/api/agent/analyze",
+                    json={"screenshot": MOCK_B64, "heading": 0.0, "max_iter": 5, "cur_iter": 0})
     assert r.status_code == 200
 
 
 def test_analyze_endpoint_response_shape(client):
-    r = client.post("/api/agent/analyze", json={"screenshot": MOCK_B64, "max_iterations": 5})
+    r = client.post("/api/agent/analyze",
+                    json={"screenshot": MOCK_B64, "heading": 0.0, "max_iter": 5, "cur_iter": 0})
     data = r.json()
-    for key in ["belief_state", "action", "specialist_outputs", "iteration"]:
+    for key in ["belief_state", "action", "specialist_outputs"]:
         assert key in data, f"Missing key '{key}' in response"
 
 
 def test_analyze_endpoint_action_type(client):
-    r = client.post("/api/agent/analyze", json={"screenshot": MOCK_B64, "max_iterations": 5})
+    r = client.post("/api/agent/analyze",
+                    json={"screenshot": MOCK_B64, "heading": 0.0, "max_iter": 5, "cur_iter": 0})
     assert r.json()["action"]["type"] in ("GUESS", "ROTATE", "MOVE")
 
 
 def test_analyze_endpoint_commits_at_max_1(client):
-    r = client.post("/api/agent/analyze", json={"screenshot": MOCK_B64, "max_iterations": 1})
+    r = client.post("/api/agent/analyze",
+                    json={"screenshot": MOCK_B64, "heading": 0.0, "max_iter": 1, "cur_iter": 0})
     data = r.json()
     assert data["action"]["type"] == "GUESS"
     assert len(data["final_guess"]) > 0

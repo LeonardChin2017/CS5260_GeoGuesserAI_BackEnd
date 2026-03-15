@@ -7,6 +7,8 @@ from fastapi import FastAPI
 from agent import Agent, AnalysisResult
 from game import Game
 
+from pydantic import BaseModel
+
 AGENT_LOCK: asyncio.Lock = asyncio.Lock()
 AGENT: Optional[Agent] = None
 
@@ -55,7 +57,7 @@ async def agent_frame():
     return out
 
 
-class AnalysisRequest:
+class AnalysisRequest(BaseModel):
     screenshot: str  # base64-encoded image (raw base64)
     heading: float
     max_iter: int
@@ -73,7 +75,7 @@ async def agent_analyze(req: AnalysisRequest):
     return asdict(result)
 
 
-class RunRequest:
+class RunRequest(BaseModel):
     start_lat: float
     start_lon: float
     start_heading: float
@@ -94,5 +96,7 @@ async def agent_run(req: RunRequest):
     """
     game: Game = Game()
     game.reset(req.start_lat, req.start_lon, req.start_heading)
-    with AGENT_LOCK:
+    async with AGENT_LOCK:
         return AGENT.run(game, req.max_iter)
+
+asyncio.run(start_agent())
