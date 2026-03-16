@@ -95,11 +95,11 @@ async def start_agent():
         "running": True,
         "steps": [],
         "game": {
-            "view_lat": getattr(SESSION.game, "_cur_lat", None) if SESSION.game else None,
-            "view_lon": getattr(SESSION.game, "_cur_lon", None) if SESSION.game else None,
-            "heading": getattr(SESSION.game, "heading", None) if SESSION.game else None,
-            "target_lat": getattr(SESSION.game, "_tar_lat", None) if SESSION.game else None,
-            "target_lon": getattr(SESSION.game, "_tar_lon", None) if SESSION.game else None,
+            "view_lat": SESSION.game._cur_lat if SESSION.game else None,
+            "view_lon": SESSION.game._cur_lon if SESSION.game else None,
+            "heading": SESSION.game.heading if SESSION.game else None,
+            "target_lat": SESSION.game._tar_lat if SESSION.game else None,
+            "target_lon": SESSION.game._tar_lon if SESSION.game else None,
         },
     }
 
@@ -139,12 +139,12 @@ async def agent_status():
     if game is not None:
         # Expose only the fields used by the frontend.
         game_snapshot = {
-            "view_lat": getattr(game, "_cur_lat", None),
-            "view_lon": getattr(game, "_cur_lon", None),
-            "heading": getattr(game, "heading", None),
+            "view_lat": game._cur_lat,
+            "view_lon": game._cur_lon,
+            "heading": game.heading,
             # These may be populated once a guess is made; keep optional.
-            "target_lat": getattr(game, "_tar_lat", None),
-            "target_lon": getattr(game, "_tar_lon", None),
+            "target_lat": game._tar_lat,
+            "target_lon": game._tar_lon,
         }
 
     return {
@@ -167,11 +167,11 @@ async def agent_frame():
             out["frame_mime"] = "image/jpeg"
         if SESSION.game is not None:
             out["game"] = {
-                "view_lat": getattr(SESSION.game, "_cur_lat", None),
-                "view_lon": getattr(SESSION.game, "_cur_lon", None),
-                "heading": getattr(SESSION.game, "heading", None),
-                "target_lat": getattr(SESSION.game, "_tar_lat", None),
-                "target_lon": getattr(SESSION.game, "_tar_lon", None),
+                "view_lat": SESSION.game._cur_lat,
+                "view_lon": SESSION.game._cur_lon,
+                "heading": SESSION.game.heading,
+                "target_lat": SESSION.game._tar_lat,
+                "target_lon": SESSION.game._tar_lon,
             }
         out["last_action"] = SESSION.last_action or ""
         out["last_frame_at"] = SESSION.last_frame_at
@@ -417,11 +417,11 @@ async def agent_observation(req: ObservationRequest):
         game_snapshot: Optional[dict[str, Any]] = None
         if SESSION.game is not None:
             game_snapshot = {
-                "view_lat": getattr(SESSION.game, "_cur_lat", None),
-                "view_lon": getattr(SESSION.game, "_cur_lon", None),
-                "heading": getattr(SESSION.game, "heading", None),
-                "target_lat": getattr(SESSION.game, "_tar_lat", None),
-                "target_lon": getattr(SESSION.game, "_tar_lon", None),
+                "view_lat": SESSION.game._cur_lat,
+                "view_lon": SESSION.game._cur_lon,
+                "heading": SESSION.game.heading,
+                "target_lat": SESSION.game._tar_lat,
+                "target_lon": SESSION.game._tar_lon,
                 "final_distance_km": getattr(SESSION.game, "final_distance_km", None),
                 "score": getattr(SESSION.game, "score", None),
                 "guess_lat": getattr(SESSION.game, "guess_lat", None),
