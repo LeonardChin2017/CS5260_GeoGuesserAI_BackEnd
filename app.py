@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import asdict
 from datetime import datetime, timezone
+import math
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -41,6 +42,11 @@ class AgentSession:
         self.error: str = ""
         # Do not start issuing capture/analyze commands before this UTC epoch seconds.
         self.analyze_not_before_s: float = 0.0
+        # Final result state (kept in session; Game.guess() is stateless).
+        self.final_distance_km: Optional[float] = None
+        self.score: Optional[float] = None
+        self.guess_lat: Optional[float] = None
+        self.guess_lon: Optional[float] = None
 
     def reset(self, game: Game, max_iter: int = 5) -> None:
         self.running = True
@@ -56,9 +62,34 @@ class AgentSession:
         self.command_seq = 0
         self.error = ""
         self.analyze_not_before_s = 0.0
+        self.final_distance_km = None
+        self.score = None
+        self.guess_lat = None
+        self.guess_lon = None
 
 
 SESSION: AgentSession = AgentSession()
+
+
+def _haversine_km(a_lat: float, a_lon: float, b_lat: float, b_lon: float) -> float:
+    r = 6371.0
+    lat1 = math.radians(a_lat)
+    lat2 = math.radians(b_lat)
+    dlat = math.radians(b_lat - a_lat)
+    dlon = math.radians(b_lon - a_lon)
+    h = (math.sin(dlat / 2) ** 2) + math.cos(lat1) * math.cos(lat2) * (math.sin(dlon / 2) ** 2)
+    return 2 * r * math.asin(min(1.0, math.sqrt(h)))
+
+
+def _compute_distance_km(game: Game, guess_lat: float, guess_lon: float) -> float:
+    """
+    Prefer Game.guess() but guarantee a finite numeric distance.
+    """
+    d = float(game.guess(guess_lat, guess_lon))
+    if math.isfinite(d):
+        return d
+    # Fallback: use haversine on stored target coordinates.
+    return float(_haversine_km(guess_lat, guess_lon, float(game._tar_lat), float(game._tar_lon)))
 
 app = FastAPI()
 
@@ -162,10 +193,10 @@ async def agent_status():
             "target_lat": game._tar_lat,
             "target_lon": game._tar_lon,
             # Final result fields (present once the agent commits a guess).
-            "final_distance_km": getattr(game, "final_distance_km", None),
-            "score": getattr(game, "score", None),
-            "guess_lat": getattr(game, "guess_lat", None),
-            "guess_lon": getattr(game, "guess_lon", None),
+            "final_distance_km": SESSION.final_distance_km,
+            "score": SESSION.score,
+            "guess_lat": SESSION.guess_lat,
+            "guess_lon": SESSION.guess_lon,
         }
 
     return {
@@ -193,10 +224,10 @@ async def agent_frame():
                 "heading": SESSION.game.heading,
                 "target_lat": SESSION.game._tar_lat,
                 "target_lon": SESSION.game._tar_lon,
-                "final_distance_km": getattr(SESSION.game, "final_distance_km", None),
-                "score": getattr(SESSION.game, "score", None),
-                "guess_lat": getattr(SESSION.game, "guess_lat", None),
-                "guess_lon": getattr(SESSION.game, "guess_lon", None),
+                "final_distance_km": SESSION.final_distance_km,
+                "score": SESSION.score,
+                "guess_lat": SESSION.guess_lat,
+                "guess_lon": SESSION.guess_lon,
             }
         out["last_action"] = SESSION.last_action or ""
         out["last_frame_at"] = SESSION.last_frame_at
@@ -272,8 +303,7 @@ async def agent_next_command():
         # If session is not running or game already has a final result, never issue
         # further commands.
         final_distance = None
-        if SESSION.game is not None:
-            final_distance = getattr(SESSION.game, "final_distance_km", None)
+        final_distance = SESSION.final_distance_km
         if not SESSION.running or final_distance is not None:
             SESSION.running = False
             return {"running": False, "command": "idle", "command_seq": SESSION.command_seq}
@@ -413,13 +443,13 @@ async def agent_observation(req: ObservationRequest):
                 try:
                     guess_lat = float(result.final_guess.get("lat"))
                     guess_lon = float(result.final_guess.get("lon"))
-                    distance_km = SESSION.game.guess(guess_lat, guess_lon)
+                    distance_km = _compute_distance_km(SESSION.game, guess_lat, guess_lon)
                     score = max(0.0, 5000.0 - distance_km * 10.0)
                     SESSION.running = False
-                    setattr(SESSION.game, "final_distance_km", distance_km)
-                    setattr(SESSION.game, "score", score)
-                    setattr(SESSION.game, "guess_lat", guess_lat)
-                    setattr(SESSION.game, "guess_lon", guess_lon)
+                    SESSION.final_distance_km = float(distance_km)
+                    SESSION.score = float(score)
+                    SESSION.guess_lat = float(guess_lat)
+                    SESSION.guess_lon = float(guess_lon)
                 except Exception as exc:
                     error = f"Failed to compute guess score from agent final_guess: {exc}"
             elif SESSION.iter >= SESSION.max_iter:
@@ -430,15 +460,14 @@ async def agent_observation(req: ObservationRequest):
         # If this observation carried a final guess, compute distance and stop.
         if req.command.lower() == "guess" and req.guess_lat is not None and req.guess_lon is not None:
             try:
-                distance_km = SESSION.game.guess(req.guess_lat, req.guess_lon)
+                distance_km = _compute_distance_km(SESSION.game, float(req.guess_lat), float(req.guess_lon))
                 # Attach simple scoring heuristic: higher score for smaller distance.
                 score = max(0.0, 5000.0 - distance_km * 10.0)
                 SESSION.running = False
-                # Extend game snapshot with result fields expected by the frontend.
-                setattr(SESSION.game, "final_distance_km", distance_km)
-                setattr(SESSION.game, "score", score)
-                setattr(SESSION.game, "guess_lat", req.guess_lat)
-                setattr(SESSION.game, "guess_lon", req.guess_lon)
+                SESSION.final_distance_km = float(distance_km)
+                SESSION.score = float(score)
+                SESSION.guess_lat = float(req.guess_lat)
+                SESSION.guess_lon = float(req.guess_lon)
                 # Mark latest_analysis as a GUESS-type action so status/next-command
                 # logic consistently treats this as a terminal state.
                 if SESSION.latest_analysis is not None:
@@ -460,10 +489,10 @@ async def agent_observation(req: ObservationRequest):
                 "heading": SESSION.game.heading,
                 "target_lat": SESSION.game._tar_lat,
                 "target_lon": SESSION.game._tar_lon,
-                "final_distance_km": getattr(SESSION.game, "final_distance_km", None),
-                "score": getattr(SESSION.game, "score", None),
-                "guess_lat": getattr(SESSION.game, "guess_lat", None),
-                "guess_lon": getattr(SESSION.game, "guess_lon", None),
+                "final_distance_km": SESSION.final_distance_km,
+                "score": SESSION.score,
+                "guess_lat": SESSION.guess_lat,
+                "guess_lon": SESSION.guess_lon,
             }
 
         return {
