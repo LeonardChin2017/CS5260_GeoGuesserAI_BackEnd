@@ -39,6 +39,8 @@ class AgentSession:
         self.last_observation: dict[str, Any] = {}
         self.command_seq: int = 0
         self.error: str = ""
+        # Do not start issuing capture/analyze commands before this UTC epoch seconds.
+        self.analyze_not_before_s: float = 0.0
 
     def reset(self, game: Game, max_iter: int = 5) -> None:
         self.running = True
@@ -53,6 +55,7 @@ class AgentSession:
         self.last_observation = {}
         self.command_seq = 0
         self.error = ""
+        self.analyze_not_before_s = 0.0
 
 
 SESSION: AgentSession = AgentSession()
@@ -89,6 +92,19 @@ async def start_agent():
         game = Game()
         game.set_to_random_street_view()
         SESSION.reset(game, max_iter=5)
+        # Always show the initial image first; delay any analysis commands briefly.
+        SESSION.analyze_not_before_s = datetime.now(timezone.utc).timestamp() + 2.0
+        # Provide an initial frame immediately so the frontend can display the
+        # view before any analysis/observations occur.
+        try:
+            SESSION.last_frame = game.render_image(size="640x640", timeout=20)
+            SESSION.last_frame_at = datetime.now(timezone.utc).isoformat()
+            SESSION.last_action = "INIT"
+        except Exception as exc:
+            log_event(f"[agent_start] initial frame fetch failed: {exc}")
+            SESSION.last_frame = ""
+            SESSION.last_frame_at = datetime.now(timezone.utc).isoformat()
+            SESSION.last_action = "INIT_ERROR"
         log_event("[agent_start] New agent session created")
     return {
         "ok": True,
@@ -253,13 +269,22 @@ async def agent_next_command():
             SESSION.running = False
             return {"running": False, "command": "idle", "command_seq": SESSION.command_seq}
 
-        # First step in a session: always capture.
+        # Ensure the frontend has time to show the initial frame before we start
+        # issuing capture/analyze requests.
+        now_s = datetime.now(timezone.utc).timestamp()
+        if SESSION.analyze_not_before_s and now_s < SESSION.analyze_not_before_s:
+            return {"running": True, "command": "idle", "command_seq": SESSION.command_seq}
+
+        # First step in a session: always capture at the current backend view.
         if SESSION.latest_analysis is None:
             SESSION.command_seq += 1
             return {
                 "running": True,
                 "command": "capture",
                 "command_seq": SESSION.command_seq,
+                "view_lat": SESSION.game._cur_lat if SESSION.game else None,
+                "view_lon": SESSION.game._cur_lon if SESSION.game else None,
+                "heading": SESSION.game.heading if SESSION.game else None,
             }
 
         action = SESSION.latest_analysis.action if SESSION.latest_analysis else {}
@@ -275,28 +300,35 @@ async def agent_next_command():
                 "command_seq": SESSION.command_seq,
             }
 
-        command = "idle"
+        # Backend is the source of truth for view state. Instead of telling the
+        # frontend to "rotate", we update the backend view and request another
+        # capture at the new view.
+        if SESSION.game is None:
+            SESSION.game = Game()
+
         if action_type == "ROTATE":
-            command = "rotate_right" if degrees >= 0 else "rotate_left"
+            try:
+                SESSION.game.turn(delta_yaw=degrees, delta_pitch=0.0)
+            except Exception as exc:
+                log_event(f"[next_command] rotate failed: {exc}")
         elif action_type == "MOVE":
-            # Map MOVE to a small right rotation as a simple surrogate.
-            command = "rotate_right"
-        else:
-            command = "idle"
+            try:
+                SESSION.game.move_forward()
+            except Exception as exc:
+                log_event(f"[next_command] move failed: {exc}")
+        elif action_type == "GUESS":
+            SESSION.running = False
+            return {"running": False, "command": "idle", "command_seq": SESSION.command_seq}
 
-        if command == "idle":
-            return {
-                "running": SESSION.running,
-                "command": "idle",
-                "command_seq": SESSION.command_seq,
-            }
-
+        # After applying the action (if any), request a new capture at the updated view.
         SESSION.command_seq += 1
         return {
             "running": SESSION.running,
-            "command": command,
+            "command": "capture",
             "command_seq": SESSION.command_seq,
-            "degrees": degrees,
+            "view_lat": SESSION.game._cur_lat,
+            "view_lon": SESSION.game._cur_lon,
+            "heading": SESSION.game.heading,
         }
 
 
@@ -352,11 +384,8 @@ async def agent_observation(req: ObservationRequest):
         # Update game snapshot with latest view/guess metadata if available.
         if SESSION.game is None:
             SESSION.game = Game()
-        if req.view_lat is not None and req.view_lon is not None:
-            SESSION.game._cur_lat = req.view_lat
-            SESSION.game._cur_lon = req.view_lon
-        if req.heading is not None:
-            SESSION.game.heading = req.heading
+        # Backend is the source of truth for view state; the frontend may send
+        # view metadata for debugging, but we do not overwrite backend state with it.
 
         # Run one analysis step when we have a screenshot.
         if not error and screenshot_data:
