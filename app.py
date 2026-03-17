@@ -161,6 +161,11 @@ async def agent_status():
             # These may be populated once a guess is made; keep optional.
             "target_lat": game._tar_lat,
             "target_lon": game._tar_lon,
+            # Final result fields (present once the agent commits a guess).
+            "final_distance_km": getattr(game, "final_distance_km", None),
+            "score": getattr(game, "score", None),
+            "guess_lat": getattr(game, "guess_lat", None),
+            "guess_lon": getattr(game, "guess_lon", None),
         }
 
     return {
@@ -188,6 +193,10 @@ async def agent_frame():
                 "heading": SESSION.game.heading,
                 "target_lat": SESSION.game._tar_lat,
                 "target_lon": SESSION.game._tar_lon,
+                "final_distance_km": getattr(SESSION.game, "final_distance_km", None),
+                "score": getattr(SESSION.game, "score", None),
+                "guess_lat": getattr(SESSION.game, "guess_lat", None),
+                "guess_lon": getattr(SESSION.game, "guess_lon", None),
             }
         out["last_action"] = SESSION.last_action or ""
         out["last_frame_at"] = SESSION.last_frame_at
