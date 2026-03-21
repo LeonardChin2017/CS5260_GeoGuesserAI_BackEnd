@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from http.client import HTTPException
 from typing import Any
@@ -49,6 +50,30 @@ class Agent:
             specialist_outputs=result.get("specialist_outputs", {}),
             error=result.get("error", '')
         )
+
+    def stream_analyze(self, new_frame: str, heading: float, max_iter: int, cur_iter: int):
+        initial_state: GeoState = {
+            "screenshot": new_frame,
+            "iteration": cur_iter,
+            "max_iterations": max_iter,
+            "specialist_outputs": {},
+            "belief_state": self.belief_state,
+            "action": {},
+            "final_guess": {},
+            "error": '',
+        }
+        try:
+            for chunk in geo_graph.stream(initial_state, stream_mode="updates"):
+                # Accumulate state internally
+                for node_name, state_update in chunk.items():
+                    if "belief_state" in state_update:
+                        self.belief_state = state_update["belief_state"]
+                    if "action" in state_update:
+                        self.action_history.append(state_update["action"])
+                # Yield chunk as Server-Sent Event
+                yield f"data: {json.dumps(chunk)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
     def run(self, game: Game, max_iter: int) -> dict[str, Any]:
         for i in range(max_iter):

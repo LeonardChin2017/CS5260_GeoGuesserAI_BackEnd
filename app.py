@@ -1,10 +1,12 @@
 import asyncio
 from dataclasses import asdict
 from datetime import datetime, timezone
+import json
 import math
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from agent import Agent, AnalysisResult
@@ -251,6 +253,98 @@ async def agent_analyze(req: AnalysisRequest):
     result: AnalysisResult = AGENT.analyze(req.screenshot, req.heading, req.max_iter, req.cur_iter)
     return asdict(result)
 
+
+
+@app.post("/api/agent/stream-analyze")
+async def agent_stream_analyze(req: AnalysisRequest):
+    """
+    Single-iteration streaming: runs the LangGraph pipeline on one screenshot.
+    Yields Server-Sent Events (SSE) for each graph node update.
+    """
+    if AGENT is None:
+        raise HTTPException(status_code=400, detail="Agent not started.")
+
+    # Use session counters when a live run is active so next-command can advance.
+    async with AGENT_LOCK:
+        iter_value = SESSION.iter if SESSION.running else req.cur_iter
+        max_iter_value = SESSION.max_iter if SESSION.running else req.max_iter
+
+    async def graph_event_generator():
+        final_belief_state: list[Any] = []
+        final_action: dict[str, Any] = {}
+        final_guess: dict[str, Any] = {}
+        final_specialist_outputs: dict[str, Any] = {}
+        final_error: str = ""
+
+        for event in AGENT.stream_analyze(req.screenshot, req.heading, max_iter_value, iter_value):
+            # Forward each SSE event to the client as-is.
+            yield event
+
+            # Also parse streamed updates so session state advances like /observation.
+            if not event.startswith("data: "):
+                continue
+            raw_payload = event[6:].strip()
+            try:
+                payload = json.loads(raw_payload)
+            except Exception:
+                continue
+
+            if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+                final_error = payload["error"]
+                continue
+
+            if not isinstance(payload, dict):
+                continue
+
+            for _node_name, state_update in payload.items():
+                if not isinstance(state_update, dict):
+                    continue
+                if "specialist_outputs" in state_update and isinstance(state_update["specialist_outputs"], dict):
+                    final_specialist_outputs.update(state_update["specialist_outputs"])
+                if "belief_state" in state_update and isinstance(state_update["belief_state"], list):
+                    final_belief_state = state_update["belief_state"]
+                if "action" in state_update and isinstance(state_update["action"], dict):
+                    final_action = state_update["action"]
+                if "final_guess" in state_update and isinstance(state_update["final_guess"], dict):
+                    final_guess = state_update["final_guess"]
+                if "error" in state_update and isinstance(state_update["error"], str) and state_update["error"]:
+                    final_error = state_update["error"]
+
+        analysis_result = AnalysisResult(
+            belief_state=final_belief_state,
+            action=final_action,
+            final_guess=final_guess,
+            specialist_outputs=final_specialist_outputs,
+            error=final_error,
+        )
+
+        async with AGENT_LOCK:
+            # Keep session in sync with streamed analysis so next-command can terminate.
+            SESSION.latest_analysis = analysis_result
+            SESSION.iter += 1
+            SESSION.last_action = str(analysis_result.action.get("type", "")).upper()
+            if analysis_result.error:
+                SESSION.error = analysis_result.error
+
+            if SESSION.last_action == "GUESS":
+                try:
+                    guess_lat = float(analysis_result.final_guess.get("lat"))
+                    guess_lon = float(analysis_result.final_guess.get("lon"))
+                    if SESSION.game is not None:
+                        distance_km = _compute_distance_km(SESSION.game, guess_lat, guess_lon)
+                        score = max(0.0, 5000.0 - distance_km * 10.0)
+                        SESSION.final_distance_km = float(distance_km)
+                        SESSION.score = float(score)
+                        SESSION.guess_lat = float(guess_lat)
+                        SESSION.guess_lon = float(guess_lon)
+                except Exception as exc:
+                    SESSION.error = f"Failed to compute guess score from stream final_guess: {exc}"
+                finally:
+                    SESSION.running = False
+            elif SESSION.iter >= SESSION.max_iter:
+                SESSION.running = False
+
+    return StreamingResponse(graph_event_generator(), media_type="text/event-stream")
 
 class RunRequest(BaseModel):
     start_lat: float
