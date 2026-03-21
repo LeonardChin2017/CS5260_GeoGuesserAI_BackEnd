@@ -5,7 +5,17 @@ from http.client import HTTPException
 from typing import Any
 
 from game import Game
-from graphs.geoguessr_graph import geo_graph
+from langgraph.graph import StateGraph, END
+from graphs.state import GeoState
+from graphs.nodes.ingest import ingest_node
+from graphs.nodes.specialists import (
+    text_language_node,
+    architecture_node,
+    climate_terrain_node,
+    vegetation_node,
+    road_infra_node,
+)
+from graphs.nodes.fusion import fusion_planner_node
 from graphs.state import GeoState
 from util import log_event
 
@@ -25,6 +35,35 @@ class Agent:
         self.frame: str = ''
         self.belief_state: list[dict[str, Any]] = []
         self.action_history: list[dict[str, Any]] = []
+        self.geo_graph = None
+
+        self.initialize_graph()
+
+    def initialize_graph(self):
+        graph = StateGraph(GeoState)
+
+        graph.add_node("ingest", ingest_node)
+        graph.add_node("text_language", text_language_node)
+        graph.add_node("architecture", architecture_node)
+        graph.add_node("climate_terrain", climate_terrain_node)
+        graph.add_node("vegetation", vegetation_node)
+        graph.add_node("road_infra", road_infra_node)
+        graph.add_node("fusion_planner", fusion_planner_node)
+
+        graph.set_entry_point("ingest")
+
+        # ingest → all specialists in parallel (fan-out)
+        for specialist in ["text_language", "architecture", "climate_terrain", "vegetation", "road_infra"]:
+            graph.add_edge("ingest", specialist)
+
+        # all specialists → fusion_planner (fan-in)
+        for specialist in ["text_language", "architecture", "climate_terrain", "vegetation", "road_infra"]:
+            graph.add_edge(specialist, "fusion_planner")
+
+        graph.add_edge("fusion_planner", END)
+
+        self.geo_graph = graph.compile()
+
 
     def analyze(self, new_frame: str, heading: float, max_iter: int, cur_iter: int) -> AnalysisResult:
         # TODO incorporate heading information (to deduce sun direction)
@@ -39,7 +78,7 @@ class Agent:
             "error": '',
         }
         try:
-            result = geo_graph.invoke(initial_state)
+            result = self.geo_graph.invoke(initial_state)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
         self.belief_state = result.get("belief_state", self.belief_state)
@@ -65,7 +104,7 @@ class Agent:
             "error": '',
         }
         try:
-            for chunk in geo_graph.stream(initial_state, stream_mode="updates"):
+            for chunk in self.geo_graph.stream(initial_state, stream_mode="updates"):
                 # Accumulate state internally
                 for node_name, state_update in chunk.items():
                     if "belief_state" in state_update:
@@ -99,8 +138,7 @@ class Agent:
                 self.game.move_forward()
         return {"error": f"Agent did not give a guess after {max_iter} iterations"}
     
-    @staticmethod
-    def export_geo_graph_image(output_path: str = "geo_graph.png") -> str:
+    def export_geo_graph_image(self, output_path: str = "geo_graph.png") -> str:
         """
         Export a visualization of ``geo_graph``.
 
@@ -111,7 +149,7 @@ class Agent:
         out_path = Path(output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        drawable = geo_graph.get_graph()
+        drawable = self.geo_graph.get_graph()
 
         # Primary path: PNG bytes from Mermaid rendering.
         if out_path.suffix.lower() == ".png":
