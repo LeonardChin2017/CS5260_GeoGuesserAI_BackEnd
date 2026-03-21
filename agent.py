@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from dataclasses import dataclass
 from http.client import HTTPException
 from typing import Any
@@ -96,9 +97,42 @@ class Agent:
             elif action == "MOVE":
                 game.move_forward()
         return {"error": f"Agent did not give a guess after {max_iter} iterations"}
+    
+    @staticmethod
+    def export_geo_graph_image(output_path: str = "geo_graph.png") -> str:
+        """
+        Export a visualization of ``geo_graph``.
 
+        Preferred output is PNG. If PNG rendering fails in the current environment,
+        a Mermaid diagram is saved next to the requested output path and a clear
+        RuntimeError is raised with the fallback path.
+        """
+        out_path = Path(output_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        drawable = geo_graph.get_graph()
+
+        # Primary path: PNG bytes from Mermaid rendering.
+        if out_path.suffix.lower() == ".png":
+            try:
+                png_bytes = drawable.draw_mermaid_png()
+                out_path.write_bytes(png_bytes)
+                return str(out_path)
+            except Exception as exc:
+                # Fallback: persist Mermaid source so users can still render/view it.
+                mermaid_path = out_path.with_suffix(".mmd")
+                mermaid_path.write_text(drawable.draw_mermaid(), encoding="utf-8")
+                raise RuntimeError(
+                    f"PNG export failed ({exc}). Mermaid diagram saved to {mermaid_path}."
+                ) from exc
+
+        # Non-PNG outputs are written as Mermaid diagram text.
+        out_path.write_text(drawable.draw_mermaid(), encoding="utf-8")
+        return str(out_path)
 
 if __name__ == "__main__":
     game: Game = Game()
     game.set_to_random_street_view()
-    print(Agent().run(game, max_iter=3))
+    agent = Agent()
+    agent.export_geo_graph_image("geo_graph_old.png")
+    print(agent.run(game, max_iter=3))
