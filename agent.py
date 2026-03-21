@@ -20,7 +20,8 @@ class AnalysisResult:
 
 
 class Agent:
-    def __init__(self):
+    def __init__(self, game: Game = None):
+        self.game = game
         self.frame: str = ''
         self.belief_state: list[dict[str, Any]] = []
         self.action_history: list[dict[str, Any]] = []
@@ -76,15 +77,15 @@ class Agent:
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
-    def run(self, game: Game, max_iter: int) -> dict[str, Any]:
+    def run(self, max_iter: int) -> dict[str, Any]:
         for i in range(max_iter):
-            frame: str = game.render_image()
-            result: AnalysisResult = self.analyze(frame, game.heading, max_iter, i)
+            frame: str = self.game.render_image()
+            result: AnalysisResult = self.analyze(frame, self.game.heading, max_iter, i)
             if len(result.error) > 0:
                 return {"error": result.error}
             action: str = result.action["type"]
             if action == "GUESS":
-                guess_dist: float = game.guess(result.final_guess["lat"], result.final_guess["lon"])
+                guess_dist: float = self.game.guess(result.final_guess["lat"], result.final_guess["lon"])
                 log_event(f"GUESS RESULT: {guess_dist}km")
                 return {
                     "final_guess": result.final_guess,
@@ -93,9 +94,9 @@ class Agent:
                     "errors": result.error
                 }
             if action == "ROTATE":
-                game.turn(result.action["degrees"], 0)
+                self.game.turn(result.action["degrees"], 0)
             elif action == "MOVE":
-                game.move_forward()
+                self.game.move_forward()
         return {"error": f"Agent did not give a guess after {max_iter} iterations"}
     
     @staticmethod
@@ -133,6 +134,6 @@ class Agent:
 if __name__ == "__main__":
     game: Game = Game()
     game.set_to_random_street_view()
-    agent = Agent()
+    agent = Agent(game)
     agent.export_geo_graph_image("geo_graph_old.png")
-    print(agent.run(game, max_iter=3))
+    print(agent.run(max_iter=3))

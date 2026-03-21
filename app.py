@@ -385,7 +385,8 @@ async def agent_run(req: RunRequest):
     async with AGENT_LOCK:
         if AGENT is None:
             raise HTTPException(status_code=500, detail="Agent is not initialized")
-        return AGENT.run(game, req.max_iter)
+        AGENT.game = game
+        return AGENT.run(req.max_iter)
 
 
 @app.get("/api/agent/next-command")
