@@ -27,6 +27,7 @@ class AnalysisResult:
     final_guess: dict
     specialist_outputs: dict
     error: str
+    iteration: int = 0
 
 
 class Agent:
@@ -39,12 +40,19 @@ class Agent:
 
         self.initialize_graph()
 
-    def render_image(self, state: GeoState) -> dict[str, str]:
+    def render_image(self, state: GeoState) -> dict[str, Any]:
         if self.game is None:
             raise ValueError("Game instance is not set in Agent.")
         image = self.game.render_image()
         self.frame = image
-        return {"screenshot": image}
+        # Reset transient fields each cycle so specialists always write fresh output.
+        return {
+            "screenshot": image,
+            "specialist_outputs": {},
+            "action": {},
+            "final_guess": {},
+            "error": '',
+        }
 
     def initialize_graph(self):
         graph = StateGraph(GeoState)
@@ -84,8 +92,22 @@ class Agent:
             },
         )
         graph.add_edge("execute_guess", END)
-        graph.add_edge("execute_rotate", END)
-        graph.add_edge("execute_move", END)
+        graph.add_conditional_edges(
+            "execute_rotate",
+            self.route_exploration_loop,
+            {
+                "CONTINUE": "render_image",
+                "STOP": END,
+            },
+        )
+        graph.add_conditional_edges(
+            "execute_move",
+            self.route_exploration_loop,
+            {
+                "CONTINUE": "render_image",
+                "STOP": END,
+            },
+        )
 
         self.geo_graph = graph.compile()
 
@@ -95,6 +117,12 @@ class Agent:
         if action_type in {"GUESS", "ROTATE", "MOVE"}:
             return action_type
         return "GUESS"
+
+    @staticmethod
+    def route_exploration_loop(state: GeoState) -> str:
+        iteration = int(state.get("iteration", 0))
+        max_iterations = int(state.get("max_iterations", 0))
+        return "CONTINUE" if iteration < max_iterations else "STOP"
 
     def execute_guess(self, state: GeoState) -> dict[str, Any]:
         if self.game is None:
@@ -126,7 +154,7 @@ class Agent:
         return {}
 
 
-    def analyze(self, max_iter: int, cur_iter: int) -> AnalysisResult:
+    def analyze(self, max_iter: int, cur_iter: int = 0) -> AnalysisResult:
         # TODO incorporate heading information (to deduce sun direction)
         initial_state: GeoState = {
             "iteration": cur_iter,
@@ -149,7 +177,8 @@ class Agent:
             action=action,
             final_guess=result.get("final_guess", {}),
             specialist_outputs=result.get("specialist_outputs", {}),
-            error=result.get("error", '')
+            error=result.get("error", ''),
+            iteration=int(result.get("iteration", cur_iter)),
         )
 
     def stream_analyze(self, new_frame: str, heading: float, max_iter: int, cur_iter: int):
@@ -177,20 +206,19 @@ class Agent:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
     def run(self, max_iter: int) -> dict[str, Any]:
-        for i in range(max_iter):
-            result: AnalysisResult = self.analyze(max_iter, i)
-            if len(result.error) > 0:
-                return {"error": result.error}
-            if len(result.final_guess) > 0:
-                distance_km = result.final_guess.get("distance_km")
-                if distance_km is not None:
-                    log_event(f"GUESS RESULT: {distance_km}km")
-                return {
-                    "final_guess": result.final_guess,
-                    "belief_state": result.belief_state,
-                    "iterations_used": i + 1,
-                    "errors": result.error
-                }
+        result: AnalysisResult = self.analyze(max_iter=max_iter, cur_iter=0)
+        if len(result.error) > 0:
+            return {"error": result.error}
+        if len(result.final_guess) > 0:
+            distance_km = result.final_guess.get("distance_km")
+            if distance_km is not None:
+                log_event(f"GUESS RESULT: {distance_km}km")
+            return {
+                "final_guess": result.final_guess,
+                "belief_state": result.belief_state,
+                "iterations_used": result.iteration,
+                "errors": result.error,
+            }
         return {"error": f"Agent did not give a guess after {max_iter} iterations"}
     
     def export_geo_graph_image(self, output_path: str = "geo_graph.png") -> str:
