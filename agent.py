@@ -57,6 +57,9 @@ class Agent:
         graph.add_node("vegetation", vegetation_node)
         graph.add_node("road_infra", road_infra_node)
         graph.add_node("fusion_planner", fusion_planner_node)
+        graph.add_node("execute_guess", self.execute_guess)
+        graph.add_node("execute_rotate", self.execute_rotate)
+        graph.add_node("execute_move", self.execute_move)
 
         graph.set_entry_point("render_image")
 
@@ -71,9 +74,56 @@ class Agent:
         for specialist in ["text_language", "architecture", "climate_terrain", "vegetation", "road_infra"]:
             graph.add_edge(specialist, "fusion_planner")
 
-        graph.add_edge("fusion_planner", END)
+        graph.add_conditional_edges(
+            "fusion_planner",
+            self.route_action,
+            {
+                "GUESS": "execute_guess",
+                "ROTATE": "execute_rotate",
+                "MOVE": "execute_move",
+            },
+        )
+        graph.add_edge("execute_guess", END)
+        graph.add_edge("execute_rotate", END)
+        graph.add_edge("execute_move", END)
 
         self.geo_graph = graph.compile()
+
+    @staticmethod
+    def route_action(state: GeoState) -> str:
+        action_type = str(state.get("action", {}).get("type", "GUESS")).upper()
+        if action_type in {"GUESS", "ROTATE", "MOVE"}:
+            return action_type
+        return "GUESS"
+
+    def execute_guess(self, state: GeoState) -> dict[str, Any]:
+        if self.game is None:
+            raise ValueError("Game instance is not set in Agent.")
+
+        final_guess = dict(state.get("final_guess", {}))
+        action = state.get("action", {})
+
+        lat = final_guess.get("lat", action.get("lat"))
+        lon = final_guess.get("lon", action.get("lon"))
+        if lat is None or lon is None:
+            return {"error": "Missing GUESS coordinates in action/final_guess."}
+
+        guess_dist: float = self.game.guess(float(lat), float(lon))
+        final_guess["distance_km"] = guess_dist
+        return {"final_guess": final_guess}
+
+    def execute_rotate(self, state: GeoState) -> dict[str, Any]:
+        if self.game is None:
+            raise ValueError("Game instance is not set in Agent.")
+        degrees = float(state.get("action", {}).get("degrees", 90.0))
+        self.game.turn(degrees, 0)
+        return {}
+
+    def execute_move(self, state: GeoState) -> dict[str, Any]:
+        if self.game is None:
+            raise ValueError("Game instance is not set in Agent.")
+        self.game.move_forward()
+        return {}
 
 
     def analyze(self, max_iter: int, cur_iter: int) -> AnalysisResult:
@@ -131,20 +181,16 @@ class Agent:
             result: AnalysisResult = self.analyze(max_iter, i)
             if len(result.error) > 0:
                 return {"error": result.error}
-            action: str = result.action["type"]
-            if action == "GUESS":
-                guess_dist: float = self.game.guess(result.final_guess["lat"], result.final_guess["lon"])
-                log_event(f"GUESS RESULT: {guess_dist}km")
+            if len(result.final_guess) > 0:
+                distance_km = result.final_guess.get("distance_km")
+                if distance_km is not None:
+                    log_event(f"GUESS RESULT: {distance_km}km")
                 return {
                     "final_guess": result.final_guess,
                     "belief_state": result.belief_state,
                     "iterations_used": i + 1,
                     "errors": result.error
                 }
-            if action == "ROTATE":
-                self.game.turn(result.action["degrees"], 0)
-            elif action == "MOVE":
-                self.game.move_forward()
         return {"error": f"Agent did not give a guess after {max_iter} iterations"}
     
     def export_geo_graph_image(self, output_path: str = "geo_graph.png") -> str:
