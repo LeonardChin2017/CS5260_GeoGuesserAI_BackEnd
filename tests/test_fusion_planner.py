@@ -207,6 +207,13 @@ def test_fusion_iteration_increments():
     assert result["iteration"] == 3
 
 
+def test_fusion_iteration_does_not_exceed_max_iterations():
+    from graphs.nodes.fusion import fusion_planner_node
+    with patch("graphs.nodes.fusion.call_gemini_vision", return_value=MOCK_FUSION_GUESS):
+        result = fusion_planner_node(_make_state(iteration=0, max_iterations=0))
+    assert result["iteration"] == 0
+
+
 def test_fusion_graceful_on_api_error():
     from graphs.nodes.fusion import fusion_planner_node
     with patch("graphs.nodes.fusion.call_gemini_vision", side_effect=Exception("timeout")):

@@ -14,6 +14,9 @@ class GeoState(TypedDict):
     # Input: base64-encoded screenshot (data URL or raw base64 JPEG)
     screenshot: str
 
+    # The mode of operation (e.g., "analyze", "run")
+    mode : str
+
     # The current iterations number (0-indexed)
     iteration: int
 

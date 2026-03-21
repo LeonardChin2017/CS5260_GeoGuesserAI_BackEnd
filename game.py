@@ -44,7 +44,7 @@ def has_streetview(lat: float, lon: float) -> bool:
     return data.get("status", '') == "OK"
 
 
-def find_nearby_streetview(lat: float, lon: float, radius_m: float) -> (float, float):
+def find_nearby_streetview(lat: float, lon: float, radius_m: float) -> tuple[float, float]:
     url: str = (f"https://maps.googleapis.com/maps/api/streetview/metadata"
                 f"?location={lat},{lon}"
                 f"&radius={radius_m}"
@@ -138,9 +138,9 @@ class Game:
             return
         new_lon, new_lat, _ = _WGS84_GEOD.fwd(self._cur_lon, self._cur_lat, self.heading, distance_m)
         new_lon = ((new_lon + 180) % 360) - 180
-        if not has_streetview(new_lon, new_lat):
+        if not has_streetview(new_lat, new_lon):
             log_event(f"({new_lat},{new_lon}) has no street view")
-            new_lon, new_lat = find_nearby_streetview(new_lon, new_lat, distance_m * 2)
+            new_lat, new_lon = find_nearby_streetview(new_lat, new_lon, distance_m * 2)
             log_event(f"Moving to ({new_lat},{new_lon})")
         self._cur_lat = new_lat
         self._cur_lon = new_lon
