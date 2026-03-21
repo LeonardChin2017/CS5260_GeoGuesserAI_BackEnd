@@ -93,6 +93,33 @@ def _compute_distance_km(game: Game, guess_lat: float, guess_lon: float) -> floa
     # Fallback: use haversine on stored target coordinates.
     return float(_haversine_km(guess_lat, guess_lon, float(game._tar_lat), float(game._tar_lon)))
 
+
+def _session_game_snapshot() -> Optional[dict[str, Any]]:
+    if SESSION.game is None:
+        return None
+    return {
+        "view_lat": SESSION.game._cur_lat,
+        "view_lon": SESSION.game._cur_lon,
+        "heading": SESSION.game.heading,
+        "target_lat": SESSION.game._tar_lat,
+        "target_lon": SESSION.game._tar_lon,
+        "final_distance_km": SESSION.final_distance_km,
+        "score": SESSION.score,
+        "guess_lat": SESSION.guess_lat,
+        "guess_lon": SESSION.guess_lon,
+    }
+
+
+def _parse_sse_data_payload(event: str) -> Optional[dict[str, Any]]:
+    if not event.startswith("data: "):
+        return None
+    raw_payload = event[6:].strip()
+    try:
+        payload = json.loads(raw_payload)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
 app = FastAPI()
 
 # Allow the Vite dev server (frontend) to call this API from http://localhost:5173
@@ -261,13 +288,14 @@ async def agent_stream_analyze(req: AnalysisRequest):
     Single-iteration streaming: runs the LangGraph pipeline on one screenshot.
     Yields Server-Sent Events (SSE) for each graph node update.
     """
-    if AGENT is None:
-        raise HTTPException(status_code=400, detail="Agent not started.")
-
-    # Use session counters when a live run is active so next-command can advance.
+    # Read session/agent snapshot under lock to avoid races.
     async with AGENT_LOCK:
-        iter_value = SESSION.iter if SESSION.running else req.cur_iter
-        max_iter_value = SESSION.max_iter if SESSION.running else req.max_iter
+        agent = AGENT
+        if agent is None:
+            raise HTTPException(status_code=400, detail="Agent not started.")
+        live_session = SESSION.running
+        iter_value = SESSION.iter if live_session else req.cur_iter
+        max_iter_value = SESSION.max_iter if live_session else req.max_iter
 
     async def graph_event_generator():
         final_belief_state: list[Any] = []
@@ -276,24 +304,17 @@ async def agent_stream_analyze(req: AnalysisRequest):
         final_specialist_outputs: dict[str, Any] = {}
         final_error: str = ""
 
-        for event in AGENT.stream_analyze(req.screenshot, req.heading, max_iter_value, iter_value):
+        for event in agent.stream_analyze(req.screenshot, req.heading, max_iter_value, iter_value):
             # Forward each SSE event to the client as-is.
             yield event
 
             # Also parse streamed updates so session state advances like /observation.
-            if not event.startswith("data: "):
-                continue
-            raw_payload = event[6:].strip()
-            try:
-                payload = json.loads(raw_payload)
-            except Exception:
+            payload = _parse_sse_data_payload(event)
+            if payload is None:
                 continue
 
-            if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+            if isinstance(payload.get("error"), str):
                 final_error = payload["error"]
-                continue
-
-            if not isinstance(payload, dict):
                 continue
 
             for _node_name, state_update in payload.items():
@@ -316,33 +337,55 @@ async def agent_stream_analyze(req: AnalysisRequest):
             final_guess=final_guess,
             specialist_outputs=final_specialist_outputs,
             error=final_error,
+            iteration=int(iter_value),
         )
 
-        async with AGENT_LOCK:
-            # Keep session in sync with streamed analysis so next-command can terminate.
-            SESSION.latest_analysis = analysis_result
-            SESSION.iter += 1
-            SESSION.last_action = str(analysis_result.action.get("type", "")).upper()
-            if analysis_result.error:
-                SESSION.error = analysis_result.error
+        # Keep the agent memory coherent even when using streaming mode.
+        if analysis_result.belief_state:
+            agent.belief_state = analysis_result.belief_state
+        if analysis_result.action:
+            agent.action_history.append(analysis_result.action)
 
-            if SESSION.last_action == "GUESS":
-                try:
-                    guess_lat = float(analysis_result.final_guess.get("lat"))
-                    guess_lon = float(analysis_result.final_guess.get("lon"))
-                    if SESSION.game is not None:
-                        distance_km = _compute_distance_km(SESSION.game, guess_lat, guess_lon)
-                        score = max(0.0, 5000.0 - distance_km * 10.0)
-                        SESSION.final_distance_km = float(distance_km)
-                        SESSION.score = float(score)
-                        SESSION.guess_lat = float(guess_lat)
-                        SESSION.guess_lon = float(guess_lon)
-                except Exception as exc:
-                    SESSION.error = f"Failed to compute guess score from stream final_guess: {exc}"
-                finally:
+        async with AGENT_LOCK:
+            # Keep live session in sync so /next-command can advance correctly.
+            if live_session:
+                SESSION.latest_analysis = analysis_result
+                SESSION.iter += 1
+                SESSION.last_action = str(analysis_result.action.get("type", "")).upper()
+                if analysis_result.error:
+                    SESSION.error = analysis_result.error
+
+                if SESSION.last_action == "GUESS":
+                    try:
+                        guess_lat = float(
+                            analysis_result.final_guess.get("lat", analysis_result.action.get("lat"))
+                        )
+                        guess_lon = float(
+                            analysis_result.final_guess.get("lon", analysis_result.action.get("lon"))
+                        )
+                        if SESSION.game is not None:
+                            distance_km = _compute_distance_km(SESSION.game, guess_lat, guess_lon)
+                            score = max(0.0, 5000.0 - distance_km * 10.0)
+                            SESSION.final_distance_km = float(distance_km)
+                            SESSION.score = float(score)
+                            SESSION.guess_lat = float(guess_lat)
+                            SESSION.guess_lon = float(guess_lon)
+                    except Exception as exc:
+                        SESSION.error = f"Failed to compute guess score from stream final_guess: {exc}"
+                    finally:
+                        SESSION.running = False
+                elif SESSION.iter >= SESSION.max_iter:
                     SESSION.running = False
-            elif SESSION.iter >= SESSION.max_iter:
-                SESSION.running = False
+
+            done_payload = {
+                "done": True,
+                "running": SESSION.running if live_session else False,
+                "result": asdict(analysis_result),
+                "game": _session_game_snapshot() if live_session else None,
+            }
+
+        yield f"data: {json.dumps(done_payload)}\n\n"
+        yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(graph_event_generator(), media_type="text/event-stream")
 
@@ -351,19 +394,6 @@ class RunRequest(BaseModel):
     start_lon: float
     start_heading: float
     max_iter: int
-
-
-class ObservationRequest(BaseModel):
-    command: str
-    screenshot: Optional[str] = None
-    screenshot_url: Optional[str] = None
-    view_lat: Optional[float] = None
-    view_lon: Optional[float] = None
-    heading: Optional[float] = None
-    pitch: Optional[float] = None
-    guess_lat: Optional[float] = None
-    guess_lon: Optional[float] = None
-    command_seq: int
 
 
 @app.post("/api/agent/run")
@@ -388,6 +418,114 @@ async def agent_run(req: RunRequest):
         AGENT.game = game
         return AGENT.run(req.max_iter)
 
+@app.post("/api/agent/stream-run")
+async def agent_stream_run(req: RunRequest):
+    """
+    Full autopilot loop with streaming updates: runs the multi-iteration exploration pipeline.
+
+    Each iteration:
+      1. Calls the LangGraph pipeline (specialists + fusion) on the current screenshot.
+      2. Streams SSE updates for each graph node execution.
+      3. If fusion returns GUESS → stop and return result.
+      4. If fusion returns ROTATE/MOVE → execute action (fetch new Street View frame) → repeat.
+
+    Stops early on GUESS or when max_iterations is exhausted.
+    """
+    game: Game = Game()
+    game.reset(req.start_lat, req.start_lon, req.start_heading)
+    async with AGENT_LOCK:
+        agent = AGENT
+        if agent is None:
+            raise HTTPException(status_code=500, detail="Agent is not initialized")
+        agent.game = game
+
+    async def graph_event_generator():
+        final_belief_state: list[Any] = []
+        final_action: dict[str, Any] = {}
+        final_guess: dict[str, Any] = {}
+        final_specialist_outputs: dict[str, Any] = {}
+        final_error: str = ""
+        final_iteration: int = 0
+
+        for event in agent.stream_run(req.max_iter):
+            yield event
+
+            payload = _parse_sse_data_payload(event)
+            if payload is None:
+                continue
+
+            if isinstance(payload.get("error"), str):
+                final_error = payload["error"]
+                continue
+
+            for _node_name, state_update in payload.items():
+                if not isinstance(state_update, dict):
+                    continue
+                if "specialist_outputs" in state_update and isinstance(state_update["specialist_outputs"], dict):
+                    final_specialist_outputs.update(state_update["specialist_outputs"])
+                if "belief_state" in state_update and isinstance(state_update["belief_state"], list):
+                    final_belief_state = state_update["belief_state"]
+                if "action" in state_update and isinstance(state_update["action"], dict):
+                    final_action = state_update["action"]
+                if "final_guess" in state_update and isinstance(state_update["final_guess"], dict):
+                    final_guess = state_update["final_guess"]
+                if "iteration" in state_update:
+                    try:
+                        final_iteration = int(state_update["iteration"])
+                    except Exception:
+                        pass
+                if "error" in state_update and isinstance(state_update["error"], str) and state_update["error"]:
+                    final_error = state_update["error"]
+
+        # Ensure legacy stream-run also returns distance/score when a guess is present.
+        distance_km: Optional[float] = None
+        score: Optional[float] = None
+        if final_action.get("type", "").upper() == "GUESS":
+            try:
+                guess_lat = float(final_guess.get("lat", final_action.get("lat")))
+                guess_lon = float(final_guess.get("lon", final_action.get("lon")))
+                distance_km = _compute_distance_km(game, guess_lat, guess_lon)
+                score = max(0.0, 5000.0 - distance_km * 10.0)
+                final_guess = {
+                    **final_guess,
+                    "lat": guess_lat,
+                    "lon": guess_lon,
+                    "distance_km": float(distance_km),
+                    "score": float(score),
+                }
+            except Exception as exc:
+                final_error = final_error or f"Failed to compute guess score from stream-run: {exc}"
+
+        done_payload = {
+            "done": True,
+            "running": False,
+            "result": asdict(
+                AnalysisResult(
+                    belief_state=final_belief_state,
+                    action=final_action,
+                    final_guess=final_guess,
+                    specialist_outputs=final_specialist_outputs,
+                    error=final_error,
+                    iteration=final_iteration,
+                )
+            ),
+            "game": {
+                "view_lat": game._cur_lat,
+                "view_lon": game._cur_lon,
+                "heading": game.heading,
+                "target_lat": game._tar_lat,
+                "target_lon": game._tar_lon,
+                "final_distance_km": distance_km,
+                "score": score,
+                "guess_lat": final_guess.get("lat"),
+                "guess_lon": final_guess.get("lon"),
+            },
+        }
+
+        yield f"data: {json.dumps(done_payload)}\n\n"
+        yield "event: done\ndata: {}\n\n"
+
+    return StreamingResponse(graph_event_generator(), media_type="text/event-stream")
 
 @app.get("/api/agent/next-command")
 async def agent_next_command():
@@ -465,6 +603,17 @@ async def agent_next_command():
             "heading": SESSION.game.heading,
         }
 
+class ObservationRequest(BaseModel):
+    command: str
+    screenshot: Optional[str] = None
+    screenshot_url: Optional[str] = None
+    view_lat: Optional[float] = None
+    view_lon: Optional[float] = None
+    heading: Optional[float] = None
+    pitch: Optional[float] = None
+    guess_lat: Optional[float] = None
+    guess_lon: Optional[float] = None
+    command_seq: int
 
 @app.post("/api/agent/observation")
 async def agent_observation(req: ObservationRequest):

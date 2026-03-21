@@ -57,7 +57,9 @@ class Agent:
     def initialize_graph(self):
         graph = StateGraph(GeoState)
 
+        graph.add_node("mode_gate", self.mode_gate)
         graph.add_node("render_image", self.render_image)
+        graph.add_node("dispatch_action", self.dispatch_action)
         graph.add_node("ingest", ingest_node)
         graph.add_node("text_language", text_language_node)
         graph.add_node("architecture", architecture_node)
@@ -68,10 +70,19 @@ class Agent:
         graph.add_node("execute_guess", self.execute_guess)
         graph.add_node("execute_rotate", self.execute_rotate)
         graph.add_node("execute_move", self.execute_move)
+        graph.add_node("iteration_guard", self.iteration_guard)
 
-        graph.set_entry_point("render_image")
+        graph.set_entry_point("mode_gate")
+        graph.add_conditional_edges(
+            "mode_gate",
+            self.route_mode,
+            {
+                "RUN": "render_image",
+                "ANALYZE": "ingest",
+            },
+        )
 
-        # render_image → ingest
+        # run mode: render_image → ingest
         graph.add_edge("render_image", "ingest")
 
         # ingest → all specialists in parallel (fan-out)
@@ -84,6 +95,14 @@ class Agent:
 
         graph.add_conditional_edges(
             "fusion_planner",
+            self.route_after_fusion,
+            {
+                "STOP": END,
+                "ACTION": "dispatch_action",
+            },
+        )
+        graph.add_conditional_edges(
+            "dispatch_action",
             self.route_action,
             {
                 "GUESS": "execute_guess",
@@ -92,24 +111,39 @@ class Agent:
             },
         )
         graph.add_edge("execute_guess", END)
+        graph.add_edge("execute_rotate", "iteration_guard")
+        graph.add_edge("execute_move", "iteration_guard")
         graph.add_conditional_edges(
-            "execute_rotate",
+            "iteration_guard",
             self.route_exploration_loop,
             {
                 "CONTINUE": "render_image",
-                "STOP": END,
-            },
-        )
-        graph.add_conditional_edges(
-            "execute_move",
-            self.route_exploration_loop,
-            {
-                "CONTINUE": "render_image",
-                "STOP": END,
+                "STOP": "execute_guess",
             },
         )
 
         self.geo_graph = graph.compile()
+
+    @staticmethod
+    def mode_gate(state: GeoState) -> dict[str, Any]:
+        """No-op node used as a conditional entry gate by execution mode."""
+        return {"mode": state.get("mode", "run")}
+
+    @staticmethod
+    def dispatch_action(state: GeoState) -> dict[str, Any]:
+        """No-op node to separate mode routing from action routing."""
+        return {"action": state.get("action", {})}
+
+    @staticmethod
+    def route_mode(state: GeoState) -> str:
+        mode = str(state.get("mode", "run")).lower()
+        return "ANALYZE" if mode == "analyze" else "RUN"
+
+    @staticmethod
+    def route_after_fusion(state: GeoState) -> str:
+        # Analyze mode runs a single screenshot pass and returns immediately.
+        mode = str(state.get("mode", "run")).lower()
+        return "STOP" if mode == "analyze" else "ACTION"
 
     @staticmethod
     def route_action(state: GeoState) -> str:
@@ -123,6 +157,29 @@ class Agent:
         iteration = int(state.get("iteration", 0))
         max_iterations = int(state.get("max_iterations", 0))
         return "CONTINUE" if iteration < max_iterations else "STOP"
+
+    @staticmethod
+    def iteration_guard(state: GeoState) -> dict[str, Any]:
+        """
+        Explicitly validate/check loop counters before deciding whether to continue.
+        This makes iteration budget checks visible as a dedicated graph node.
+        """
+        try:
+            iteration = int(state.get("iteration", 0))
+        except Exception:
+            iteration = 0
+
+        try:
+            max_iterations = int(state.get("max_iterations", 0))
+        except Exception:
+            max_iterations = 0
+
+        iteration = max(0, iteration)
+        max_iterations = max(0, max_iterations)
+        return {
+            "iteration": iteration,
+            "max_iterations": max_iterations,
+        }
 
     def execute_guess(self, state: GeoState) -> dict[str, Any]:
         if self.game is None:
@@ -153,38 +210,84 @@ class Agent:
         self.game.move_forward()
         return {}
 
+    def analyze(self, frame: str, heading: float = 0.0, max_iter: int = 1, cur_iter: int = 0) -> AnalysisResult:
+        # Heading is currently unused in graph state but kept for API compatibility.
+        _ = heading
 
-    def analyze(self, max_iter: int, cur_iter: int = 0) -> AnalysisResult:
-        # TODO incorporate heading information (to deduce sun direction)
+        screenshot = frame or ""
+        if screenshot.startswith("data:"):
+            try:
+                screenshot = screenshot.split(",", 1)[1]
+            except Exception:
+                screenshot = ""
+
         initial_state: GeoState = {
-            "iteration": cur_iter,
-            "max_iterations": max_iter,
-            "specialist_outputs": {},  # fresh each iteration TODO keep some information across iteration
+            "mode": "analyze",
+            "screenshot": screenshot,
+            "iteration": int(cur_iter),
+            "max_iterations": int(max_iter),
+            "specialist_outputs": {},
             "belief_state": self.belief_state,
             "action": {},
             "final_guess": {},
             "error": '',
         }
+
         try:
-            result = self.geo_graph.invoke(initial_state)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-        self.belief_state = result.get("belief_state", self.belief_state)
-        action: dict[str, Any] = result.get("action", {})
+            raw_result = self.geo_graph.invoke(initial_state)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+        self.belief_state = raw_result.get("belief_state", self.belief_state)
+        action: dict[str, Any] = raw_result.get("action", {})
         self.action_history.append(action)
+
         return AnalysisResult(
             belief_state=self.belief_state,
             action=action,
-            final_guess=result.get("final_guess", {}),
-            specialist_outputs=result.get("specialist_outputs", {}),
-            error=result.get("error", ''),
-            iteration=int(result.get("iteration", cur_iter)),
+            final_guess=raw_result.get("final_guess", {}),
+            specialist_outputs=raw_result.get("specialist_outputs", {}),
+            error=raw_result.get("error", ''),
+            iteration=int(raw_result.get("iteration", cur_iter)),
         )
 
-    def stream_analyze(self, new_frame: str, heading: float, max_iter: int, cur_iter: int):
+    def stream_analyze(self, frame: str, heading: float = 0.0, max_iter: int = 1, cur_iter: int = 0):
+        """Yield SSE-formatted updates for one screenshot analysis pass."""
+        _ = heading
+
+        screenshot = frame or ""
+        if screenshot.startswith("data:"):
+            try:
+                screenshot = screenshot.split(",", 1)[1]
+            except Exception:
+                screenshot = ""
+
         initial_state: GeoState = {
-            "screenshot": new_frame,
-            "iteration": cur_iter,
+            "mode": "analyze",
+            "screenshot": screenshot,
+            "iteration": int(cur_iter),
+            "max_iterations": int(max_iter),
+            "specialist_outputs": {},
+            "belief_state": self.belief_state,
+            "action": {},
+            "final_guess": {},
+            "error": '',
+        }
+
+        try:
+            for event in self.geo_graph.stream(initial_state, stream_mode="updates"):
+                log_event(f"stream_analyze event: {event}")
+                yield f"data: {json.dumps(event)}\n\n"
+            yield "event: done\ndata: {}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+            yield "event: done\ndata: {}\n\n"
+
+    def run(self, max_iter: int) -> dict[str, Any]:
+        # TODO incorporate heading information (to deduce sun direction)
+        initial_state: GeoState = {
+            "mode": "run",
+            "iteration": 0,
             "max_iterations": max_iter,
             "specialist_outputs": {},
             "belief_state": self.belief_state,
@@ -193,20 +296,23 @@ class Agent:
             "error": '',
         }
         try:
-            for chunk in self.geo_graph.stream(initial_state, stream_mode="updates"):
-                # Accumulate state internally
-                for node_name, state_update in chunk.items():
-                    if "belief_state" in state_update:
-                        self.belief_state = state_update["belief_state"]
-                    if "action" in state_update:
-                        self.action_history.append(state_update["action"])
-                # Yield chunk as Server-Sent Event
-                yield f"data: {json.dumps(chunk)}\n\n"
+            raw_result = self.geo_graph.invoke(initial_state)
         except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            raise HTTPException(status_code=500, detail=str(e))
 
-    def run(self, max_iter: int) -> dict[str, Any]:
-        result: AnalysisResult = self.analyze(max_iter=max_iter, cur_iter=0)
+        self.belief_state = raw_result.get("belief_state", self.belief_state)
+        action: dict[str, Any] = raw_result.get("action", {})
+        self.action_history.append(action)
+
+        result = AnalysisResult(
+            belief_state=self.belief_state,
+            action=action,
+            final_guess=raw_result.get("final_guess", {}),
+            specialist_outputs=raw_result.get("specialist_outputs", {}),
+            error=raw_result.get("error", ''),
+            iteration=int(raw_result.get("iteration", 0)),
+        )
+
         if len(result.error) > 0:
             return {"error": result.error}
         if len(result.final_guess) > 0:
@@ -221,6 +327,37 @@ class Agent:
             }
         return {"error": f"Agent did not give a guess after {max_iter} iterations"}
     
+    def stream_run(self, max_iter: int):
+        """Yield SSE-formatted updates for a full run-mode graph execution."""
+        initial_state: GeoState = {
+            "mode": "run",
+            "iteration": 0,
+            "max_iterations": int(max_iter),
+            "specialist_outputs": {},
+            "belief_state": self.belief_state,
+            "action": {},
+            "final_guess": {},
+            "error": '',
+        }
+
+        try:
+            for event in self.geo_graph.stream(initial_state, stream_mode="updates"):
+                # Keep agent memory in sync while streaming.
+                if isinstance(event, dict):
+                    for _node_name, state_update in event.items():
+                        if not isinstance(state_update, dict):
+                            continue
+                        if isinstance(state_update.get("belief_state"), list):
+                            self.belief_state = state_update["belief_state"]
+                        if isinstance(state_update.get("action"), dict):
+                            self.action_history.append(state_update["action"])
+                log_event(f"stream_run event:\n{json.dumps(event)}")
+                yield f"data: {json.dumps(event)}\n\n"
+            yield "event: done\ndata: {}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+            yield "event: done\ndata: {}\n\n"
+
     def export_geo_graph_image(self, output_path: str = "geo_graph.png") -> str:
         """
         Export a visualization of ``geo_graph``.
@@ -261,7 +398,16 @@ class Agent:
 
 if __name__ == "__main__":
     game: Game = Game()
-    game.set_to_random_street_view()
     agent = Agent(game)
     agent.export_geo_graph_image("geo_graph_new.png")
+
+    # Run the full agent loop on a random Street View until it makes a guess or hits max iterations.
+    game.set_to_random_street_view()
     print(agent.run(max_iter=3))
+
+    # Analyze a single frame with the agent's current state (without running the full graph).
+    game.set_to_random_street_view()
+    frame = game.render_image()
+    print(agent.analyze(frame=frame))
+
+
