@@ -45,14 +45,7 @@ class Agent:
             raise ValueError("Game instance is not set in Agent.")
         image = self.game.render_image()
         self.frame = image
-        # Reset transient fields each cycle so specialists always write fresh output.
-        return {
-            "screenshot": image,
-            "specialist_outputs": {},
-            "action": {},
-            "final_guess": {},
-            "error": '',
-        }
+        return {"screenshot": image, "message": "Agent updated the street view image for the current iteration."}
 
     def initialize_graph(self):
         graph = StateGraph(GeoState)
@@ -127,12 +120,12 @@ class Agent:
     @staticmethod
     def mode_gate(state: GeoState) -> dict[str, Any]:
         """No-op node used as a conditional entry gate by execution mode."""
-        return {"mode": state.get("mode", "run")}
+        return {"mode": state.get("mode", "run"), "message": f"Agent is starting in {state.get('mode', 'run').upper()} mode."}
 
     @staticmethod
     def dispatch_action(state: GeoState) -> dict[str, Any]:
         """No-op node to separate mode routing from action routing."""
-        return {"action": state.get("action", {})}
+        return {"action": state.get("action", {}), "message": "Agent is dispatching an action."}
 
     @staticmethod
     def route_mode(state: GeoState) -> str:
@@ -154,9 +147,8 @@ class Agent:
 
     @staticmethod
     def route_exploration_loop(state: GeoState) -> str:
-        iteration = int(state.get("iteration", 0))
-        max_iterations = int(state.get("max_iterations", 0))
-        return "CONTINUE" if iteration < max_iterations else "STOP"
+        decision = str(state.get("loop_decision", "STOP")).upper()
+        return "CONTINUE" if decision == "CONTINUE" else "STOP"
 
     @staticmethod
     def iteration_guard(state: GeoState) -> dict[str, Any]:
@@ -176,10 +168,11 @@ class Agent:
 
         iteration = max(0, iteration)
         max_iterations = max(0, max_iterations)
-        return {
-            "iteration": iteration,
-            "max_iterations": max_iterations,
-        }
+
+        if iteration >= max_iterations:
+            return {"iteration": iteration, "max_iterations": max_iterations, "loop_decision": "STOP", "message": f"Agent has reached the maximum iteration budget ({iteration}/{max_iterations}) and will make a final guess."}
+        else:
+            return {"iteration": iteration + 1, "max_iterations": max_iterations, "loop_decision": "CONTINUE", "message": f"Agent is continuing to explore (iteration {iteration + 1}/{max_iterations})."}
 
     def execute_guess(self, state: GeoState) -> dict[str, Any]:
         if self.game is None:
@@ -195,20 +188,20 @@ class Agent:
 
         guess_dist: float = self.game.guess(float(lat), float(lon))
         final_guess["distance_km"] = guess_dist
-        return {"final_guess": final_guess}
+        return {"final_guess": final_guess, "message": f"Agent has decided to make a GUESS at ({lat}, {lon}) with distance {guess_dist:.2f} km."}
 
     def execute_rotate(self, state: GeoState) -> dict[str, Any]:
         if self.game is None:
             raise ValueError("Game instance is not set in Agent.")
         degrees = float(state.get("action", {}).get("degrees", 90.0))
         self.game.turn(degrees, 0)
-        return {}
+        return {"message": f"Agent has decided to rotate the street view by {degrees} degrees."}
 
     def execute_move(self, state: GeoState) -> dict[str, Any]:
         if self.game is None:
             raise ValueError("Game instance is not set in Agent.")
         self.game.move_forward()
-        return {}
+        return {"message": "Agent has decided to move the street view forward."}
 
     def analyze(self, frame: str, heading: float = 0.0, max_iter: int = 1, cur_iter: int = 0) -> AnalysisResult:
         # Heading is currently unused in graph state but kept for API compatibility.

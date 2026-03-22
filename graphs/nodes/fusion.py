@@ -141,6 +141,7 @@ def _build_state_update(result: dict, state: GeoState, iteration: int, forced: b
         "final_guess": final_guess,
         "iteration": next_iteration,
         "error": '',
+        "message": "Fusion agent's analysis completed."
     }
 
 
@@ -192,6 +193,7 @@ def _forced_guess(state: GeoState, specialist_outputs: dict, iteration: int) -> 
         "final_guess": final_guess,
         "iteration": next_iteration,
         "error": '',
+        "message": "Fusion agent's analysis completed. Iteration budget exhausted, committing best guess."
     }
 
 
@@ -207,4 +209,5 @@ def _error_fallback(state: GeoState, iteration: int, error_msg: str) -> dict:
         "final_guess": {"lat": 0.0, "lon": 0.0, "country": None, "confidence": 0.0},
         "iteration": next_iteration,
         "error": f"Fusion failed: {error_msg}",
+        "message": "Fusion agent's analysis failed."
     }

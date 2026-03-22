@@ -49,7 +49,6 @@ async def start_agent():
             AGENT = Agent(game=game)
         else:
             AGENT.game = game
-        game.set_to_random_street_view()
     return {"ok": True}
 
 
@@ -60,6 +59,17 @@ async def stop_agent():
         AGENT = None
     return {"ok": True}
 
+@app.post("/api/agent/new-streetview")
+async def agent_new_streetview():
+    global AGENT
+    async with AGENT_LOCK:
+        if AGENT is None:
+            raise HTTPException(status_code=400, detail="Agent not started.")
+        if AGENT.game is None:
+            raise HTTPException(status_code=500, detail="Agent game is not initialized.")
+        AGENT.game.set_to_random_street_view()
+        AGENT.render_image(None)
+    return {"ok": True}
 
 @app.get("/api/agent/status")
 async def agent_status():
@@ -119,9 +129,6 @@ async def agent_stream_analyze(req: AnalysisRequest):
     return StreamingResponse(graph_event_generator(), media_type="text/event-stream")
 
 class RunRequest(BaseModel):
-    start_lat: float
-    start_lon: float
-    start_heading: float
     max_iter: int
 
 
@@ -141,7 +148,6 @@ async def agent_run(req: RunRequest):
     async with AGENT_LOCK:
         if AGENT is None:
             raise HTTPException(status_code=400, detail="Agent not started.")
-        AGENT.game.reset(req.start_lat, req.start_lon, req.start_heading)
         return AGENT.run(req.max_iter)
 
 
@@ -162,7 +168,6 @@ async def agent_stream_run(req: RunRequest):
     async with AGENT_LOCK:
         if AGENT is None:
             raise HTTPException(status_code=500, detail="Agent is not initialized")
-        AGENT.game.reset(req.start_lat, req.start_lon, req.start_heading)
 
     async def graph_event_generator():
         for event in AGENT.stream_run(req.max_iter):
