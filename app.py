@@ -49,6 +49,7 @@ async def start_agent():
             AGENT = Agent(game=game)
         else:
             AGENT.game = game
+            AGENT.reset_runtime_state()
     return {"ok": True}
 
 
@@ -62,18 +63,35 @@ async def stop_agent():
 @app.post("/api/agent/new-streetview")
 async def agent_new_streetview():
     global AGENT
+    game_state: dict[str, Any] = {}
     async with AGENT_LOCK:
         if AGENT is None:
             raise HTTPException(status_code=400, detail="Agent not started.")
         if AGENT.game is None:
             raise HTTPException(status_code=500, detail="Agent game is not initialized.")
+        AGENT.reset_runtime_state()
         AGENT.game.set_to_random_street_view()
         AGENT.render_image(None)
-    return {"ok": True}
+        game_state = AGENT.get_ui_game_state()
+    return {"ok": True, "game": game_state}
 
 @app.get("/api/agent/status")
 async def agent_status():
-    return {"running": AGENT is not None}
+    game_state: dict[str, Any] = {}
+    last_action: str | None = None
+    last_frame_at: str | None = None
+    async with AGENT_LOCK:
+        running = AGENT is not None
+        if AGENT is not None:
+            game_state = AGENT.get_ui_game_state()
+            last_action = AGENT.last_action
+            last_frame_at = AGENT.last_frame_at
+    out: dict[str, Any] = {"running": running, "game": game_state}
+    if last_action:
+        out["last_action"] = last_action
+    if last_frame_at:
+        out["last_frame_at"] = last_frame_at
+    return out
 
 
 @app.get("/api/agent/frame")
@@ -81,8 +99,16 @@ async def agent_frame():
     global AGENT
     out: dict[str, Any] = {}
     async with AGENT_LOCK:
-        if AGENT is not None and len(AGENT.frame) > 0:
+        if AGENT is None:
+            return out
+        if len(AGENT.frame) > 0:
             out["frame"] = AGENT.frame
+            out["frame_mime"] = "image/jpeg"
+        out["game"] = AGENT.get_ui_game_state()
+        if AGENT.last_action:
+            out["last_action"] = AGENT.last_action
+        if AGENT.last_frame_at:
+            out["last_frame_at"] = AGENT.last_frame_at
     return out
 
 
