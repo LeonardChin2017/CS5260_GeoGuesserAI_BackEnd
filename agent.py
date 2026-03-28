@@ -41,6 +41,8 @@ class Agent:
         self.last_final_guess: dict[str, Any] = {}
         self.last_action: str | None = None
         self.last_frame_at: str | None = None
+        self._cancel_stream_run: bool = False
+        self._cancel_stream_analyze: bool = False
         self.geo_graph = None
 
         self.initialize_graph()
@@ -60,6 +62,26 @@ class Agent:
         self.last_final_guess = {}
         self.last_action = None
         self.last_frame_at = None
+        self.clear_stream_run_cancel()
+        self.clear_stream_analyze_cancel()
+
+    def request_stream_run_cancel(self) -> None:
+        self._cancel_stream_run = True
+
+    def clear_stream_run_cancel(self) -> None:
+        self._cancel_stream_run = False
+
+    def is_stream_run_cancel_requested(self) -> bool:
+        return self._cancel_stream_run
+
+    def request_stream_analyze_cancel(self) -> None:
+        self._cancel_stream_analyze = True
+
+    def clear_stream_analyze_cancel(self) -> None:
+        self._cancel_stream_analyze = False
+
+    def is_stream_analyze_cancel_requested(self) -> bool:
+        return self._cancel_stream_analyze
 
     def get_ui_game_state(self) -> dict[str, Any]:
         state: dict[str, Any] = {}
@@ -294,6 +316,7 @@ class Agent:
     def stream_analyze(self, frame: str, heading: float = 0.0, max_iter: int = 1, cur_iter: int = 0):
         """Yield SSE-formatted updates for one screenshot analysis pass."""
         _ = heading
+        self.clear_stream_analyze_cancel()
 
         screenshot = frame or ""
         if screenshot.startswith("data:"):
@@ -316,6 +339,9 @@ class Agent:
 
         try:
             for event in self.geo_graph.stream(initial_state, stream_mode="updates"):
+                if self.is_stream_analyze_cancel_requested():
+                    yield f"data: {json.dumps({'cancelled': True, 'message': 'Analyze stream cancelled by client request.'})}\n\n"
+                    break
                 log_event(f"stream_analyze event: {event}")
                 yield f"data: {json.dumps(event)}\n\n"
             yield "event: done\ndata: {}\n\n"
@@ -324,6 +350,7 @@ class Agent:
             yield "event: done\ndata: {}\n\n"
 
     def run(self, max_iter: int) -> dict[str, Any]:
+        self.clear_stream_run_cancel()
         # TODO incorporate heading information (to deduce sun direction)
         initial_state: GeoState = {
             "mode": "run",
@@ -369,6 +396,7 @@ class Agent:
     
     def stream_run(self, max_iter: int):
         """Yield SSE-formatted updates for a full run-mode graph execution."""
+        self.clear_stream_run_cancel()
         initial_state: GeoState = {
             "mode": "run",
             "iteration": 0,
@@ -382,6 +410,10 @@ class Agent:
 
         try:
             for event in self.geo_graph.stream(initial_state, stream_mode="updates"):
+                if self.is_stream_run_cancel_requested():
+                    yield f"data: {json.dumps({'cancelled': True, 'message': 'Run cancelled by client request.'})}\n\n"
+                    break
+
                 # Keep agent memory in sync while streaming.
                 if isinstance(event, dict):
                     for _node_name, state_update in event.items():

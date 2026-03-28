@@ -5,7 +5,7 @@ import json
 import math
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -49,7 +49,6 @@ async def start_agent():
             AGENT = Agent(game=game)
         else:
             AGENT.game = game
-            AGENT.reset_runtime_state()
     return {"ok": True}
 
 
@@ -57,7 +56,9 @@ async def start_agent():
 async def stop_agent():
     global AGENT
     async with AGENT_LOCK:
-        AGENT = None
+        if AGENT is not None:
+            AGENT.request_stream_run_cancel()
+            AGENT.request_stream_analyze_cancel()
     return {"ok": True}
 
 @app.post("/api/agent/new-streetview")
@@ -130,13 +131,14 @@ async def agent_analyze(req: AnalysisRequest):
     async with AGENT_LOCK:
         if AGENT is None:
             raise HTTPException(status_code=400, detail="Agent not started.")
+        AGENT.reset_runtime_state()
         result: AnalysisResult = AGENT.analyze(req.screenshot, req.heading, req.max_iter, req.cur_iter)
     return asdict(result)
 
 
 
 @app.post("/api/agent/stream-analyze")
-async def agent_stream_analyze(req: AnalysisRequest):
+async def agent_stream_analyze(req: AnalysisRequest, request: Request):
     """
     Single-iteration streaming: runs the LangGraph pipeline on one screenshot.
     Yields Server-Sent Events (SSE) for each graph node update.
@@ -146,9 +148,13 @@ async def agent_stream_analyze(req: AnalysisRequest):
     async with AGENT_LOCK:
         if AGENT is None:
             raise HTTPException(status_code=400, detail="Agent not started.")
+        AGENT.reset_runtime_state()
 
     async def graph_event_generator():
         for event in AGENT.stream_analyze(req.screenshot, req.heading, req.max_iter, req.cur_iter):
+            if await request.is_disconnected():
+                AGENT.request_stream_run_cancel()
+                break
             yield event
         yield "event: done\ndata: {}\n\n"
 
@@ -174,11 +180,12 @@ async def agent_run(req: RunRequest):
     async with AGENT_LOCK:
         if AGENT is None:
             raise HTTPException(status_code=400, detail="Agent not started.")
+        AGENT.reset_runtime_state()
         return AGENT.run(req.max_iter)
 
 
 @app.post("/api/agent/stream-run")
-async def agent_stream_run(req: RunRequest):
+async def agent_stream_run(req: RunRequest, request: Request):
     """
     Full autopilot loop with streaming updates: runs the multi-iteration exploration pipeline.
 
@@ -194,9 +201,13 @@ async def agent_stream_run(req: RunRequest):
     async with AGENT_LOCK:
         if AGENT is None:
             raise HTTPException(status_code=500, detail="Agent is not initialized")
+        AGENT.reset_runtime_state()
 
     async def graph_event_generator():
         for event in AGENT.stream_run(req.max_iter):
+            if await request.is_disconnected():
+                AGENT.request_stream_run_cancel()
+                break
             yield event
         yield "event: done\ndata: {}\n\n"
 
