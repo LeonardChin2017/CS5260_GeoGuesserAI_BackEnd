@@ -48,6 +48,31 @@ app.add_middleware(
 )
 
 
+def _ensure_agent_ready_for_run() -> None:
+    """
+    Make sure AGENT exists and has an initialized Street View state.
+
+    This keeps /api/agent/stream-run resilient to out-of-order client calls
+    (for example, stop/start/new-streetview racing each other over network).
+    """
+    global AGENT
+
+    if AGENT is None:
+        AGENT = Agent(game=Game())
+    elif AGENT.game is None:
+        AGENT.game = Game()
+        AGENT.reset_runtime_state()
+
+    game_state = AGENT.game.get_state()
+    needs_bootstrap = any(
+        isinstance(game_state.get(key), float) and math.isnan(game_state.get(key))
+        for key in ("view_lat", "view_lon", "heading")
+    )
+    if needs_bootstrap:
+        AGENT.game.set_to_random_street_view()
+        AGENT.render_image(None)
+
+
 @app.get("/")
 def root():
     return {"service": "GGSolver-backend", "message": "API only. Try GET /health."}
@@ -190,8 +215,10 @@ async def agent_run(req: RunRequest):
     """
     global AGENT
     async with AGENT_LOCK:
-        if AGENT is None:
-            raise HTTPException(status_code=400, detail="Agent not started.")
+        try:
+            _ensure_agent_ready_for_run()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Agent bootstrap failed: {exc}")
         return AGENT.run(req.max_iter)
 
 
@@ -210,8 +237,10 @@ async def agent_stream_run(req: RunRequest):
     """
     global AGENT
     async with AGENT_LOCK:
-        if AGENT is None:
-            raise HTTPException(status_code=500, detail="Agent is not initialized")
+        try:
+            _ensure_agent_ready_for_run()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Agent bootstrap failed: {exc}")
 
     async def graph_event_generator():
         for event in AGENT.stream_run(req.max_iter):
