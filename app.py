@@ -3,6 +3,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 import json
 import math
+import os
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -20,11 +21,28 @@ AGENT_LOCK: asyncio.Lock = asyncio.Lock()
 AGENT: Optional[Agent] = None
 app = FastAPI()
 
-# Allow the Vite dev server (frontend) to call this API from http://localhost:5173
+def _get_cors_origins() -> list[str]:
+    """
+    Return allowed CORS origins from env (comma-separated).
+
+    Example:
+      CORS_ALLOW_ORIGINS=https://your-app.vercel.app,https://app.example.com
+    """
+    origins = {"http://localhost:5173", "http://127.0.0.1:5173"}
+    raw = (os.getenv("CORS_ALLOW_ORIGINS") or "").strip()
+    if raw:
+        origins.update(origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip())
+    return sorted(origins)
+
+
+CORS_ORIGINS = _get_cors_origins()
+
+# Default: local Vite dev server. In production, set CORS_ALLOW_ORIGINS.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
+    allow_origins=CORS_ORIGINS,
+    # Wildcard origins and credentials are incompatible in browsers.
+    allow_credentials="*" not in CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )

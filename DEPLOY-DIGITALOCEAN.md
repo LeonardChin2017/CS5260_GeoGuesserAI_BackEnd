@@ -17,6 +17,7 @@
 5. Environment Variables:
    - `GOOGLE_MAPS_API_KEY`: Get one at https://console.cloud.google.com/apis/credentials
    - `GEMINI_API_KEY`: Get one at https://aistudio.google.com/app/api-keys.
+   - `CORS_ALLOW_ORIGINS`: Comma-separated frontend origins, e.g. `https://your-app.vercel.app`
 6. Deploy, then set `VITE_API_URL` in frontend to your backend URL.
 
 ## Option 2: Droplet with Docker
