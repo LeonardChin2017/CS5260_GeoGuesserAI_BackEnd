@@ -149,3 +149,12 @@ class Game:
         """ WGS84 geodesic distance in kilometers. """
         distance_m: float = _WGS84_GEOD.inv(lon, lat, self._tar_lon, self._tar_lat)[2]
         return round(distance_m / 1000, 3)
+
+    def get_state(self) -> dict[str, Any]:
+        return {
+            "view_lat": self._cur_lat,
+            "view_lon": self._cur_lon,
+            "target_lat": self._tar_lat,
+            "target_lon": self._tar_lon,
+            "heading": self.heading,
+        }

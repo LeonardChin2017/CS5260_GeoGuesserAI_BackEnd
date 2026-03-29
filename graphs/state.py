@@ -23,6 +23,9 @@ class GeoState(TypedDict):
     # Budget: stop exploring and commit guess after this many iterations
     max_iterations: int
 
+    # "CONTINUE" or "STOP", set by iteration_guard and read by route_exploration_loop
+    loop_decision: str  
+
     # Outputs from each specialist agent, keyed by agent name.
     # Annotated with _merge_dicts so parallel nodes can each write their own key
     # without LangGraph raising InvalidUpdateError.
@@ -39,3 +42,6 @@ class GeoState(TypedDict):
 
     # Optional error message from any node
     error: str
+
+    # Optional human-readable message for frontend (e.g., "Rotating 90 degrees right")
+    message: Optional[str]
