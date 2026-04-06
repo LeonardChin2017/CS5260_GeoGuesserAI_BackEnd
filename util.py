@@ -26,6 +26,11 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "WARNING").upper()
 logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("GGSolver")
 
+_langsmith_tracing = os.getenv("LANGSMITH_TRACING", "").lower() in ("true", "1", "yes")
+if _langsmith_tracing:
+    _langsmith_project = os.getenv("LANGSMITH_PROJECT", "default")
+    logging.getLogger("GGSolver").info(f"LangSmith tracing enabled (project: {_langsmith_project})")
+
 GEMINI_API_KEY: Optional[str] = _normalize_api_key(os.getenv("GEMINI_API_KEY"), "GEMINI_API_KEY")
 if GEMINI_API_KEY is None:
     raise ValueError("GEMINI_API_KEY not found in .env")

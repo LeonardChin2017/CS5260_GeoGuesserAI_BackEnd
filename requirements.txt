@@ -8,6 +8,7 @@ pyproj
 # LangGraph agent pipeline
 langgraph
 langchain-google-genai
+langsmith
 # Testing
 pytest
 httpx
