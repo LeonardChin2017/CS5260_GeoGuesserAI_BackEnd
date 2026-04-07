@@ -17,6 +17,8 @@ _TEXT_LANGUAGE_PROMPT = """You are a specialist in identifying text, language, a
 
 Analyze this image and identify any visible text, scripts, or language clues.
 
+Please ignore any text that is clearly part of the Google Street View interface (e.g. watermarks, copyright notices, UI elements). 
+
 Return ONLY a valid JSON object — no markdown, no explanation — with this exact schema:
 {
   "agent": "text_language",
