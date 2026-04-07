@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from agent import Agent, AnalysisResult
 from game import Game
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from util import log_event
 
@@ -73,6 +73,18 @@ def _ensure_agent_ready_for_run() -> None:
         AGENT.render_image(None)
 
 
+def _agent_snapshot_payload(agent: Agent, include_frame: bool = True) -> dict[str, Any]:
+    payload: dict[str, Any] = {"game": agent.get_ui_game_state()}
+    if include_frame and len(agent.frame) > 0:
+        payload["frame"] = agent.frame
+        payload["frame_mime"] = "image/jpeg"
+    if agent.last_action:
+        payload["last_action"] = agent.last_action
+    if agent.last_frame_at:
+        payload["last_frame_at"] = agent.last_frame_at
+    return payload
+
+
 @app.get("/")
 def root():
     return {"service": "GGSolver-backend", "message": "API only. Try GET /health."}
@@ -106,7 +118,6 @@ async def stop_agent():
 @app.post("/api/agent/new-streetview")
 async def agent_new_streetview():
     global AGENT
-    game_state: dict[str, Any] = {}
     async with AGENT_LOCK:
         if AGENT is None:
             raise HTTPException(status_code=400, detail="Agent not started.")
@@ -115,8 +126,88 @@ async def agent_new_streetview():
         AGENT.reset_runtime_state()
         AGENT.game.set_to_random_street_view()
         AGENT.render_image(None)
-        game_state = AGENT.get_ui_game_state()
-    return {"ok": True, "game": game_state}
+        snapshot = _agent_snapshot_payload(AGENT)
+    return {"ok": True, **snapshot}
+
+
+class TurnRequest(BaseModel):
+    degrees: float = Field(default=90.0)
+
+
+class MoveForwardRequest(BaseModel):
+    distance_m: float = Field(default=20.0, gt=0.0)
+
+
+@app.post("/api/agent/turn")
+async def agent_turn(req: TurnRequest):
+    global AGENT
+    async with AGENT_LOCK:
+        if AGENT is None:
+            raise HTTPException(status_code=400, detail="Agent not started.")
+        if AGENT.game is None:
+            raise HTTPException(status_code=500, detail="Agent game is not initialized.")
+        try:
+            AGENT.game.turn(delta_yaw=req.degrees)
+            AGENT.last_action = None
+            AGENT.render_image(None)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to turn street view: {exc}")
+        snapshot = _agent_snapshot_payload(AGENT)
+    return {"ok": True, **snapshot}
+
+
+@app.post("/api/agent/move-forward")
+async def agent_move_forward(req: MoveForwardRequest):
+    global AGENT
+    async with AGENT_LOCK:
+        if AGENT is None:
+            raise HTTPException(status_code=400, detail="Agent not started.")
+        if AGENT.game is None:
+            raise HTTPException(status_code=500, detail="Agent game is not initialized.")
+        try:
+            AGENT.game.move_forward(distance_m=req.distance_m)
+            AGENT.last_action = None
+            AGENT.render_image(None)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to move street view forward: {exc}")
+        snapshot = _agent_snapshot_payload(AGENT)
+    return {"ok": True, **snapshot}
+
+
+@app.post("/api/agent/zoom-in")
+async def agent_zoom_in():
+    global AGENT
+    async with AGENT_LOCK:
+        if AGENT is None:
+            raise HTTPException(status_code=400, detail="Agent not started.")
+        if AGENT.game is None:
+            raise HTTPException(status_code=500, detail="Agent game is not initialized.")
+        try:
+            AGENT.game.zoom_in(step=1)
+            AGENT.last_action = None
+            AGENT.render_image(None)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to zoom in street view: {exc}")
+        snapshot = _agent_snapshot_payload(AGENT)
+    return {"ok": True, **snapshot}
+
+
+@app.post("/api/agent/zoom-out")
+async def agent_zoom_out():
+    global AGENT
+    async with AGENT_LOCK:
+        if AGENT is None:
+            raise HTTPException(status_code=400, detail="Agent not started.")
+        if AGENT.game is None:
+            raise HTTPException(status_code=500, detail="Agent game is not initialized.")
+        try:
+            AGENT.game.zoom_out(step=1)
+            AGENT.last_action = None
+            AGENT.render_image(None)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to zoom out street view: {exc}")
+        snapshot = _agent_snapshot_payload(AGENT)
+    return {"ok": True, **snapshot}
 
 @app.get("/api/agent/status")
 async def agent_status():
@@ -144,14 +235,7 @@ async def agent_frame():
     async with AGENT_LOCK:
         if AGENT is None:
             return out
-        if len(AGENT.frame) > 0:
-            out["frame"] = AGENT.frame
-            out["frame_mime"] = "image/jpeg"
-        out["game"] = AGENT.get_ui_game_state()
-        if AGENT.last_action:
-            out["last_action"] = AGENT.last_action
-        if AGENT.last_frame_at:
-            out["last_frame_at"] = AGENT.last_frame_at
+        out = _agent_snapshot_payload(AGENT)
     return out
 
 

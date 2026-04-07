@@ -71,6 +71,7 @@ class Game:
         self._cur_lon: float = nan  # degree
         self._cur_lat: float = nan  # degree
         self._pitch: float = nan  # degree
+        self._zoom_level: int = 0  # 0 is widest; larger values zoom in.
         self.heading: float = nan  # degree, clockwise from true north
         self.api_key: str = GOOGLE_MAPS_API_KEY
 
@@ -78,6 +79,7 @@ class Game:
         self._cur_lat = self._tar_lat = lat
         self._cur_lon = self._tar_lon = lon
         self._pitch = 0.0
+        self._zoom_level = 0
         self.heading = heading
 
     def set_to_random_street_view(self) -> None:
@@ -92,16 +94,40 @@ class Game:
         log_event(f"All 50 tries failed, fall back to database")
         self.reset(*choice(LOCATION_DATABASE))
 
-    def _street_view_url(self, size: str = "1920x1280", fov: float = 100) -> str:
+    @staticmethod
+    def _zoom_level_to_fov(zoom_level: int) -> float:
+        # Static Street View images use FOV, while frontend uses zoom levels.
+        # Approximate by halving FOV per zoom step and keep API-safe bounds.
+        level = int(clamp(float(zoom_level), 0.0, 5.0))
+        return clamp(100.0 / (2 ** level), 10.0, 120.0)
+
+    def _current_fov(self) -> float:
+        return self._zoom_level_to_fov(self._zoom_level)
+
+    def set_zoom_level(self, zoom_level: int) -> None:
+        self._zoom_level = int(clamp(float(zoom_level), 0.0, 5.0))
+
+    def zoom_in(self, step: int = 1) -> None:
+        if step <= 0:
+            return
+        self.set_zoom_level(self._zoom_level + step)
+
+    def zoom_out(self, step: int = 1) -> None:
+        if step <= 0:
+            return
+        self.set_zoom_level(self._zoom_level - step)
+
+    def _street_view_url(self, size: str = "1920x1280", fov: Optional[float] = None) -> str:
         if len(self.api_key) <= 0:
             raise ValueError("Google Maps API key is required")
+        effective_fov = self._current_fov() if fov is None else clamp(float(fov), 10.0, 120.0)
         return (
             "https://maps.googleapis.com/maps/api/streetview"
             f"?size={size}"
             f"&location={self._cur_lat},{self._cur_lon}"
             f"&heading={self.heading}"
             f"&pitch={self._pitch}"
-            f"&fov={fov}"
+            f"&fov={effective_fov}"
             f"&key={self.api_key}"
         )
 
@@ -157,4 +183,6 @@ class Game:
             "target_lat": self._tar_lat,
             "target_lon": self._tar_lon,
             "heading": self.heading,
+            "zoom_level": self._zoom_level,
+            "fov": self._current_fov(),
         }

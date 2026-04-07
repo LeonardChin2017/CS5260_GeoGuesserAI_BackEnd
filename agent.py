@@ -65,7 +65,7 @@ class Agent:
         state: dict[str, Any] = {}
         if self.game is not None:
             snapshot = self.game.get_state()
-            for key in ["view_lat", "view_lon", "target_lat", "target_lon", "heading"]:
+            for key in ["view_lat", "view_lon", "target_lat", "target_lon", "heading", "zoom_level", "fov"]:
                 value = self._as_finite_number(snapshot.get(key))
                 if value is not None:
                     state[key] = value
