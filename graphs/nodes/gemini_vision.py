@@ -21,6 +21,9 @@ def _extract_b64(screenshot: str) -> tuple[str, str]:
 
 # TODO to improve robustness use https://ai.google.dev/gemini-api/docs/structured-output
 
+RETRY_CODES: set[int] = {429, 500, 502, 503, 504}
+
+
 def call_gemini_vision(prompt: str, screenshot: str, api_key: str, model: str | None = None) -> str:
     """
     Send an image + prompt to Gemini and return the raw text response.
@@ -52,28 +55,28 @@ def call_gemini_vision(prompt: str, screenshot: str, api_key: str, model: str | 
         },
     }
 
-    last_exc: Exception = Exception("No attempts made")
-    for attempt in range(3):
+    attempt: int = 0
+    while True:
         resp = requests.post(url, json=body, params={"key": api_key}, timeout=30)
-        if resp.status_code == 429:
-            wait = 15 * (attempt + 1)   # 15s, 30s, 45s
-            time.sleep(wait)
-            last_exc = Exception(f"429 rate limit after attempt {attempt + 1}")
-            continue
-        resp.raise_for_status()
-        data = resp.json()
-        cand = data["candidates"][0]
-        finish_reason = cand.get("finishReason")
-        parts = cand.get("content", {}).get("parts", [])
-        text = "".join(part.get("text", "") for part in parts if "text" in part).strip()
-        if finish_reason and finish_reason not in ("STOP", "MAX_TOKENS"):
-            raise RuntimeError(f"Gemini stopped with finishReason={finish_reason}")
-        if finish_reason == "MAX_TOKENS":
-            raise RuntimeError("Gemini output was truncated at maxOutputTokens")
-        if not text:
-            raise RuntimeError("Gemini returned empty text")
-        return text
-    raise last_exc
+        if resp.status_code not in RETRY_CODES:
+            break
+        wait: int = 2 ** attempt if attempt < 6 else 60
+        print(f"Request error {resp.status_code}. Retrying in {wait} seconds...", flush=True)
+        time.sleep(wait)
+        attempt += 1
+    resp.raise_for_status()
+    data = resp.json()
+    cand = data["candidates"][0]
+    finish_reason = cand.get("finishReason")
+    parts = cand.get("content", {}).get("parts", [])
+    text = "".join(part.get("text", "") for part in parts if "text" in part).strip()
+    if finish_reason and finish_reason not in ("STOP", "MAX_TOKENS"):
+        raise RuntimeError(f"Gemini stopped with finishReason={finish_reason}")
+    if finish_reason == "MAX_TOKENS":
+        raise RuntimeError("Gemini output was truncated at maxOutputTokens")
+    if not text:
+        raise RuntimeError("Gemini returned empty text")
+    return text
 
 
 def parse_json_response(text: str) -> dict:
