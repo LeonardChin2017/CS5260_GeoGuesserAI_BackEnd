@@ -3,6 +3,7 @@
 data/
 .venv/
 .venv-mac/
+.idea/
 __pycache__/
 *.py[cod]
 .pytest_cache/
