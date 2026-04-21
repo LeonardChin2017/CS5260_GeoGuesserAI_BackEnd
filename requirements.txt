@@ -12,3 +12,5 @@ langchain-google-genai
 pytest
 httpx
 pydantic
+# Benchmark
+flask

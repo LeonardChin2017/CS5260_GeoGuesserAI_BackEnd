@@ -7,16 +7,7 @@ from typing import Any, Optional
 import requests
 from pyproj import Geod
 
-from util import log_event, GOOGLE_MAPS_API_KEY
-
-""" (lat, lon) """
-LOCATION_DATABASE: list[tuple[float, float]] = [
-    (35.6595, 139.7005),
-    (-22.9711, -43.1822),
-    (-33.9628, 18.4098),
-    (64.1466, -21.9426),
-    (1.2975414, 103.7779669)
-]
+from util import log_event, GOOGLE_MAPS_API_KEY, LOCATION_DATABASE
 
 _WGS84_GEOD = Geod(ellps="WGS84")
 
