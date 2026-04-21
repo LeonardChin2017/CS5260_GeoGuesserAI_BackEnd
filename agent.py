@@ -363,7 +363,7 @@ class Agent:
                 "final_guess": result.final_guess,
                 "belief_state": result.belief_state,
                 "iterations_used": result.iteration,
-                "errors": result.error,
+                "error": result.error
             }
         return {"error": f"Agent did not give a guess after {max_iter} iterations"}
     

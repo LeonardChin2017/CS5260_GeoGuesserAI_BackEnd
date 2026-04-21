@@ -1,4 +1,7 @@
-""" Run this file to visualize all points in LOCATION_DATABASE on http://127.0.0.1:5000 """
+"""
+To visualize all points in LOCATION_DATABASE on http://127.0.0.1:5000,
+Run `PYTHONPATH=. python Benchmark/points_map.py`
+"""
 
 import json
 
