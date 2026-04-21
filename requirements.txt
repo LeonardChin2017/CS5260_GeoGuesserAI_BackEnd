@@ -8,9 +8,11 @@ pyproj
 # LangGraph agent pipeline
 langgraph
 langchain-google-genai
+langchain_core
 # Testing
 pytest
 httpx
 pydantic
 # Benchmark
 flask
+tqdm
