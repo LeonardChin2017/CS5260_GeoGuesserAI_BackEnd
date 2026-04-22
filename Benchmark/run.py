@@ -21,15 +21,13 @@ if __name__ == '__main__':
         for i, (lat, lng) in enumerate(tqdm(LOCATION_DATABASE)):
             i: str = str(i)
             result: Optional[dict[str, object]] = all_results.get(i)
-            if result is not None and len(result.get("error", '')) <= 0:
-                continue
-            game: Game = Game()
-            game.reset(lat, lng)
-            agent = Agent(game)
-            result: dict[str, object] = agent.run(max_iter=5)
-            all_results[i] = result
+            while result is None or len(result.get("error", '')) > 0:
+                game: Game = Game()
+                game.reset(lat, lng)
+                agent = Agent(game)
+                result: dict[str, object] = agent.run(max_iter=5)
+                all_results[i] = result
     except Exception as e:
         print(e, file=stderr)
-        pass
     with open(OUTPUT_FILE, "w") as f:
         json.dump(all_results, f, indent=2)
