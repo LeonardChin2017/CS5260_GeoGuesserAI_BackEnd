@@ -16,3 +16,6 @@ pydantic
 # Benchmark
 flask
 tqdm
+numpy
+scipy
+matplotlib

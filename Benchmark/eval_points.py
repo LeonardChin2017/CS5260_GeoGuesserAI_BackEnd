@@ -9,13 +9,13 @@ from agent import Agent
 from game import Game
 from util import LOCATION_DATABASE
 
-OUTPUT_FILE = Path("Benchmark", "results.json")
+RESULTS_FILE = Path("Benchmark", "results.json")
 
 if __name__ == '__main__':
     # Load existing results if file exists
     all_results: dict[str, object] = {}
-    if OUTPUT_FILE.exists():
-        with open(OUTPUT_FILE, "r") as f:
+    if RESULTS_FILE.exists():
+        with open(RESULTS_FILE, "r") as f:
             all_results = json.load(f)
     try:
         for i, (lat, lng) in enumerate(tqdm(LOCATION_DATABASE)):
@@ -29,5 +29,5 @@ if __name__ == '__main__':
                 all_results[i] = result
     except Exception as e:
         print(e, file=stderr)
-    with open(OUTPUT_FILE, "w") as f:
+    with open(RESULTS_FILE, "w") as f:
         json.dump(all_results, f, indent=2)
