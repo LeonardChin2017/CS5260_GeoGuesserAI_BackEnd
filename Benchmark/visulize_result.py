@@ -24,6 +24,17 @@ def save_distr_img(data: list[int | float], name: str, n_bins: int = 100, log10:
     plt.savefig(Path("Benchmark", f"{"Log10 " if log10 else ''}{name.lower().replace(' ', '_')}.png"))
 
 
+def plot_int_hist(data: list[int]):
+    plt.figure()
+    min_: int = min(data)
+    max_: int = max(data)
+    plt.hist(data, bins=np.arange(min_ - 0.5, max_ + 1.5), rwidth=0.8)
+    plt.xticks(np.arange(min_, max_ + 1))
+    plt.xlabel("Iterations Used")
+    plt.ylabel("Count")
+    plt.savefig(Path("Benchmark", f"iterations_used.png"))
+
+
 if __name__ == "__main__":
     if not RESULTS_FILE.exists():
         raise FileNotFoundError(RESULTS_FILE)
@@ -40,6 +51,7 @@ if __name__ == "__main__":
             print(f"[{i}][final_guess] has no distance_km, skipping")
             continue
         distance_kms.append(distance_km)
+    print("Average distance:", np.mean(distance_kms), "km")
     save_distr_img(distance_kms, "Distance (km)")
     save_distr_img(distance_kms, "Distance (km)", log10=True)
 
@@ -50,4 +62,4 @@ if __name__ == "__main__":
             print(f"[{i}] has no iterations_used, skipping")
             continue
         iters.append(iterations_used)
-    save_distr_img(iters, "Iterations Used", n_bins=5)
+    plot_int_hist(iters)
